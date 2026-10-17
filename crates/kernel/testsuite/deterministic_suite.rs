@@ -16,13 +16,16 @@
 use std::sync::{Mutex, MutexGuard};
 
 use moor_common::{
-    deterministic::{self, BlockContext, DeterministicMode},
+    deterministic::{self, BlockContext, DeterministicMode, IdDomain},
+    model::{HasUuid, TaskPermissions},
     tasks::NarrativeEvent,
+    util::BitEnum,
 };
+use moor_compiler::{CompileOptions, compile};
 use moor_db::Database;
-use moor_var::{E_PERM, Var, v_float, v_int, v_list};
+use moor_var::{E_PERM, Obj, SYSTEM_OBJECT, Symbol, Var, v_float, v_int, v_list};
 
-use crate::common::{create_db, run_as_verb};
+use crate::common::{compile_verbs, create_db, run_as_verb};
 
 mod common;
 
@@ -299,4 +302,53 @@ fn uuid_rebuilt_from_integers_is_unchanged() {
         det.run("return uuid(1, 2);"),
         Var::from("00000000-0000-0001-0000-000000000002")
     );
+}
+
+fn wizard() -> TaskPermissions {
+    TaskPermissions::new(Obj::mk_id(3), BitEnum::new())
+}
+
+#[test]
+fn verb_definition_ids_derive_from_the_block() {
+    let det = Det::start(8, 1_700_006_000, 5);
+    let program = compile("return 1;", CompileOptions::default()).unwrap();
+    compile_verbs(
+        det.db.as_ref(),
+        &[("det_verb_a", &program), ("det_verb_b", &program)],
+    );
+    let tx = det.db.new_world_state().unwrap();
+    let id_of = |name: &str| {
+        tx.get_verb(&wizard(), &SYSTEM_OBJECT, Symbol::mk(name))
+            .unwrap()
+            .uuid()
+    };
+    assert_eq!(
+        [id_of("det_verb_a"), id_of("det_verb_b")],
+        [
+            deterministic::derive_id(IdDomain::Definition, 8, 0, 0),
+            deterministic::derive_id(IdDomain::Definition, 8, 0, 1)
+        ]
+    );
+}
+
+#[test]
+fn property_definition_ids_derive_from_the_block() {
+    let det = Det::start(8, 1_700_006_000, 5);
+    let mut tx = det.db.new_world_state().unwrap();
+    tx.define_property(
+        &wizard(),
+        &SYSTEM_OBJECT,
+        &SYSTEM_OBJECT,
+        Symbol::mk("det_prop"),
+        &Obj::mk_id(3),
+        BitEnum::new(),
+        Some(v_int(1)),
+    )
+    .unwrap();
+    let defs = tx.properties(&wizard(), &SYSTEM_OBJECT).unwrap();
+    let id = defs
+        .find_first_named(Symbol::mk("det_prop"))
+        .expect("defined")
+        .uuid();
+    assert_eq!(id, deterministic::derive_id(IdDomain::Definition, 8, 0, 0));
 }

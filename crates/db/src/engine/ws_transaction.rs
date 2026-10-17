@@ -1236,7 +1236,8 @@ impl WorldStateTransaction {
     ) -> Result<(), WorldStateError> {
         let verbdefs = self.get_verbs(oid)?;
 
-        let uuid = Uuid::new_v4();
+        // Storage key. Derived from the block in deterministic mode (DA R8).
+        let uuid = moor_common::deterministic::definition_id();
         let verbdef = VerbDef::new(uuid, *oid, *owner, names, flags, args);
 
         let verbdefs = verbdefs.with_added(verbdef);
@@ -1529,7 +1530,8 @@ impl WorldStateTransaction {
 
         // Generate a new property ID. This will get shared all the way down the pipe.
         // But the key for the actual value is always composite of oid,uuid
-        let u = Uuid::new_v4();
+        // In deterministic mode derived from the block (DA R8).
+        let u = moor_common::deterministic::definition_id();
 
         let prop = PropDef::new(u, *definer, *location, name);
         {
