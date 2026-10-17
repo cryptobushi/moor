@@ -37,6 +37,11 @@ strum.workspace = true
 uuid.workspace = true
 zerocopy.workspace = true
 
+# Signed envelopes (ADR 0005)
+ed25519-zebra.workspace = true
+k256.workspace = true
+sha3.workspace = true
+
 # Error Handling
 eyre.workspace = true
 thiserror.workspace = true

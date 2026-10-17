@@ -110,6 +110,10 @@ pub struct DeterministicMode {
     pub enabled: bool,
     /// The block context in force until the driver sets the first block.
     pub genesis: BlockContext,
+    /// Salt of the envelope signing domain (RuneWorld ADR 0005 decision 2): the genesis state root
+    /// once one is defined (S0-5). All zero until then. Written as 64 hex digits.
+    #[serde(with = "hex_seed")]
+    pub domain_salt: [u8; 32],
 }
 
 impl DeterministicMode {
@@ -119,6 +123,7 @@ impl DeterministicMode {
         Self {
             enabled: true,
             genesis: BlockContext::default(),
+            domain_salt: [0; 32],
         }
     }
 
