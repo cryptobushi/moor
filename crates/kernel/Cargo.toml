@@ -35,6 +35,10 @@ name = "regression-suite"
 path = "testsuite/regression_suite.rs"
 
 [[test]]
+name = "deterministic-suite"
+path = "testsuite/deterministic_suite.rs"
+
+[[test]]
 name = "moot-suite"
 path = "testsuite/moot_suite.rs"
 

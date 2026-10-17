@@ -41,7 +41,7 @@ use crate::{
     },
 };
 use moor_common::{
-    build,
+    build, deterministic,
     model::{
         CapabilityGrant, CapabilityGrants, DispatchFlagsSource, HasUuid, Named, ObjFlag,
         VerbDispatch, VerbLookup, WorldStateError,
@@ -475,12 +475,8 @@ fn bf_time(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
     if !bf_args.args.is_empty() {
         return Err(ErrValue(E_ARGS.msg("time() does not take any arguments")));
     }
-    Ok(Ret(v_int(
-        SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64,
-    )))
+    // Block time in deterministic mode, wall clock otherwise.
+    Ok(Ret(v_int(deterministic::now_secs() as i64)))
 }
 
 /// Usage: `float ftime([int mode])`
@@ -493,6 +489,10 @@ fn bf_ftime(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
 
     // If argument is provided and equals 1/true, return uptime, otherwise, epoch time in float
     if bf_args.args.len() == 1 && bf_args.args[0].is_true() {
+        // Process uptime is host state. Deterministic mode reports a constant.
+        if deterministic::is_enabled() {
+            return Ok(Ret(v_float(0.0)));
+        }
         // Use Instant::now() to get the current monotonic time
         // We need to use a static to track the start time
         use std::sync::OnceLock;
@@ -503,6 +503,11 @@ fn bf_ftime(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
         let uptime = start.elapsed().as_secs_f64();
 
         return Ok(Ret(v_float(uptime)));
+    }
+
+    // Deterministic mode: block time, whole seconds only.
+    if deterministic::is_enabled() {
+        return Ok(Ret(v_float(deterministic::now_secs() as f64)));
     }
 
     // Default: return time since Unix epoch as a float
@@ -522,7 +527,7 @@ fn bf_ctime(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
         return Err(ErrValue(E_ARGS.msg("ctime() requires 0 or 1 arguments")));
     }
     let time = if bf_args.args.is_empty() {
-        SystemTime::now()
+        deterministic::now_system()
     } else {
         let Some(time) = bf_args.args[0].as_integer() else {
             return Err(ErrValue(
@@ -535,6 +540,15 @@ fn bf_ctime(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
             SystemTime::UNIX_EPOCH + Duration::from_secs(time.unsigned_abs())
         }
     };
+
+    // Deterministic mode formats in UTC: the host's timezone is not part of the world.
+    if deterministic::is_enabled() {
+        let date_time: DateTime<chrono::Utc> = chrono::DateTime::from(time);
+        return Ok(Ret(v_string(format!(
+            "{} UTC",
+            date_time.format("%a %b %d %H:%M:%S %Y")
+        ))));
+    }
 
     let date_time: DateTime<Local> = chrono::DateTime::from(time);
     let tz_str = get_timezone().unwrap();
