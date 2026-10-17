@@ -259,7 +259,11 @@ impl WorldStateTransaction {
             .object_flags
             .scan(&|_, flags| flags.contains(ObjFlag::User))
             .map_err(|e| WorldStateError::DatabaseError(format!("Error getting players: {e:?}")))?;
-        Ok(ObjSet::from_iter(players.iter().map(|(k, _)| *k)))
+        let mut players: Vec<Obj> = players.iter().map(|(k, _)| *k).collect();
+        if moor_common::util::det::is_enabled() {
+            players.sort();
+        }
+        Ok(ObjSet::from_iter(players))
     }
 
     pub fn get_max_object(&self) -> Result<Obj, WorldStateError> {
@@ -659,6 +663,9 @@ impl WorldStateTransaction {
         let mut children = Vec::new();
         self.object_parent
             .for_each_by_codomain(obj, |child| children.push(*child));
+        if moor_common::util::det::is_enabled() {
+            children.sort();
+        }
         Ok(ObjSet::from_iter(children))
     }
 
@@ -768,6 +775,9 @@ impl WorldStateTransaction {
         let mut contents = Vec::new();
         self.object_location
             .for_each_by_codomain(obj, |content| contents.push(*content));
+        if moor_common::util::det::is_enabled() {
+            contents.sort();
+        }
         Ok(ObjSet::from_iter(contents))
     }
 
