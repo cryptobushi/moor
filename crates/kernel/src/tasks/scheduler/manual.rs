@@ -34,7 +34,7 @@ use std::{
 use tracing::{debug, info};
 
 /// How a run to quiescence ended.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RunSummary {
     /// Jobs (task attempts or resumptions) run.
     pub jobs_run: usize,

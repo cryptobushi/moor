@@ -567,6 +567,12 @@ mod executor {
                 let body = match &e.kind {
                     BlockEventKind::Narrative(ev) | BlockEventKind::Logged(ev) => describe(ev),
                     BlockEventKind::System(msg) => format!("system {msg}"),
+                    BlockEventKind::Rejected {
+                        kind,
+                        session,
+                        reason,
+                    } => format!("rejected {kind:?} session={session} {reason}"),
+                    BlockEventKind::Sessions(admitted) => format!("sessions {admitted:?}"),
                 };
                 format!(
                     "{} cmd={} task={:?} to={} {}",

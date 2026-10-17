@@ -37,10 +37,24 @@
 //!   index. Unspooled system messages (tracebacks) enter the batch when sent.
 //! - At `end_block` every task still suspended is cancelled in ascending id order, so no task
 //!   outlives its block (ADR 0001 ratification note 1).
+//!
+//! # Signed inputs
+//!
+//! [`BlockDriver::submit_envelope`] is the signed path (RuneWorld ADR 0005): the admission step
+//! (`envelope_admission`) verifies and consumes the envelope in its own transaction, then the
+//! command, `user_connected`, or creation hooks run as the input's tasks. A rejected envelope runs
+//! nothing and adds one [`BlockEventKind::Rejected`] entry; delegations and revocations add one
+//! [`BlockEventKind::Sessions`] entry. Either entry follows the input's task events.
+//! [`BlockInput::SequencerDisconnect`] is the authority-free disconnect.
 
-use crate::tasks::{TaskHandle, TaskNotification, scheduler::Scheduler};
+use crate::tasks::{
+    TaskHandle,
+    envelope_admission::{AdmissionRejection, Admitted, take_result},
+    scheduler::Scheduler,
+};
 use moor_common::{
     deterministic::{self, BlockContext},
+    envelope::EnvelopeKind,
     model::ObjectRef,
     tasks::{ConnectionDetails, NarrativeEvent, SchedulerError, Session, SessionError, TaskId},
 };
@@ -75,6 +89,9 @@ pub enum BlockInput {
     Connected { player: Obj },
     /// Sequencer input: `#0:user_disconnected(player)`, as the daemon submits it.
     Disconnected { player: Obj },
+    /// Sequencer input for the signed world (ADR 0005 decision 6): a disconnect carries no
+    /// signature and no player authority, and runs `player:disfunc()` only.
+    SequencerDisconnect { player: Obj },
 }
 
 /// What happened to one input.
@@ -88,6 +105,8 @@ pub struct InputOutcome {
     pub result: Option<Result<Var, SchedulerError>>,
     /// How the run to quiescence after this input ended.
     pub run: RunSummary,
+    /// For an envelope: the admission step's verdict. `None` for unsigned inputs.
+    pub admission: Option<Result<Admitted, AdmissionRejection>>,
 }
 
 /// What a batch entry carries.
@@ -99,6 +118,14 @@ pub enum BlockEventKind {
     Logged(Box<NarrativeEvent>),
     /// An unspooled system message (traceback, "task aborted").
     System(String),
+    /// The admission step rejected an envelope; nothing ran.
+    Rejected {
+        kind: Option<EnvelopeKind>,
+        session: u32,
+        reason: AdmissionRejection,
+    },
+    /// A delegation registered a session, or a revocation revoked some.
+    Sessions(Admitted),
 }
 
 /// One entry of the event batch.
@@ -364,6 +391,50 @@ impl BlockDriver {
             task_id,
             result,
             run,
+            admission: None,
+        });
+        self.outcomes.last().expect("pushed above")
+    }
+
+    /// Submit one signed envelope (wire bytes) and run it to quiescence. Output goes to the batch
+    /// and to `inner`. Admission, rejection and session events are described in the module docs.
+    pub fn submit_envelope(&mut self, bytes: &[u8], inner: Arc<dyn Session>) -> &InputOutcome {
+        let session = self.session(inner);
+        self.scheduler.begin_sequenced_input();
+        let command_index = deterministic::current().map_or(0, |ctx| ctx.command);
+        let run = self
+            .scheduler
+            .run_envelope(bytes, session, None, self.job_budget);
+        // Drain anything the envelope's tasks left queued (forks, wakes).
+        let tail = self.scheduler.run_until_quiescent(self.job_budget);
+        let summary = RunSummary {
+            jobs_run: run.run.jobs_run + tail.jobs_run,
+            budget_exhausted: run.run.budget_exhausted || tail.budget_exhausted,
+        };
+        let player = run
+            .admission
+            .as_ref()
+            .map_or(moor_var::NOTHING, Admitted::player);
+        let kind = match &run.admission {
+            Err(reason) => Some(BlockEventKind::Rejected {
+                kind: run.kind,
+                session: run.session,
+                reason: reason.clone(),
+            }),
+            Ok(admitted @ (Admitted::Delegated { .. } | Admitted::Revoked { .. })) => {
+                Some(BlockEventKind::Sessions(admitted.clone()))
+            }
+            Ok(_) => None,
+        };
+        if let Some(kind) = kind {
+            lock(&self.batch).push(None, player, kind);
+        }
+        self.outcomes.push(InputOutcome {
+            command_index,
+            task_id: run.task_id,
+            result: run.result,
+            run: summary,
+            admission: Some(run.admission),
         });
         self.outcomes.last().expect("pushed above")
     }
@@ -406,6 +477,9 @@ impl BlockDriver {
             }
             BlockInput::Disconnected { player } => {
                 self.submit_hook(player, Symbol::mk("user_disconnected"), session)
+            }
+            BlockInput::SequencerDisconnect { player } => {
+                scheduler.submit_disconnect_input(player, session)
             }
         }
     }
@@ -469,16 +543,4 @@ impl BlockDriver {
         lc.save_schedules();
         Ok(())
     }
-}
-
-/// The first terminal result on a handle, skipping `Suspended` notices.
-fn take_result(handle: &TaskHandle) -> Option<Result<Var, SchedulerError>> {
-    handle
-        .receiver()
-        .try_iter()
-        .find_map(|(_, result)| match result {
-            Ok(TaskNotification::Suspended) => None,
-            Ok(TaskNotification::Result(value)) => Some(Ok(value)),
-            Err(error) => Some(Err(error)),
-        })
 }

@@ -66,6 +66,7 @@ pub type BatchResultSink = std::sync::Arc<
 >;
 
 pub mod block_driver;
+pub mod envelope_admission;
 pub mod scheduler;
 
 pub(crate) mod checkpoint;

@@ -24,6 +24,7 @@ use moor_common::tasks::{SchedulerError, SchedulerError::CompilationError, Sessi
 use moor_compiler::compile;
 use moor_var::{List, Obj, Symbol, Var, v_empty_str, v_obj, v_str, v_sym};
 
+use crate::tasks::envelope_admission::{EnvelopeRun, OnAdmitted};
 use crate::tasks::scheduler::{Scheduler, SchedulerState};
 use crate::tasks::world_state_action::{
     WorldStateAction, WorldStateRequest, WorldStateResponse, WorldStateResult,
@@ -845,6 +846,35 @@ impl SchedulerClient {
             Some(WorldStateResponse::Error { error, .. }) => Err(error),
             _ => Err(SchedulerError::SchedulerNotResponding),
         }
+    }
+
+    /// Admit and run one signed envelope (deterministic mode, RuneWorld ADR 0005) as one sequenced
+    /// input. Returns when the envelope's tasks have reached quiescence. `on_admitted` runs on the
+    /// sequencer thread after admission and before any task, e.g. to bind a connection.
+    pub fn submit_envelope(
+        &self,
+        bytes: Vec<u8>,
+        session: Arc<dyn Session>,
+        on_admitted: Option<OnAdmitted>,
+        timeout: Duration,
+    ) -> Result<EnvelopeRun, SchedulerError> {
+        self.ensure_running()?;
+        self.request_with_timeout(timeout, move |scheduler| {
+            Ok(scheduler.run_envelope(&bytes, session, on_admitted, usize::MAX))
+        })
+    }
+
+    /// The disconnect sequencer input (RuneWorld ADR 0005 decision 6): `player:disfunc()` with no
+    /// player authority.
+    pub fn submit_disconnect(
+        &self,
+        player: Obj,
+        session: Arc<dyn Session>,
+    ) -> Result<TaskHandle, SchedulerError> {
+        self.ensure_running()?;
+        self.request_with_timeout(Duration::from_secs(5), move |scheduler| {
+            scheduler.submit_disconnect_input(player, session)
+        })
     }
 
     /// Update a property value
