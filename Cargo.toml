@@ -201,6 +201,8 @@ syn = { version = "2.0", features = ["full", "parsing"] }
 
 # Collections & Data Structures
 ahash = "0.8"
+# Pure-Rust libm: float builtins must not depend on the platform libm (audit E6)
+libm = "0.2"
 arrayvec = "0.7"
 imbl = { version = "7.0", features = ["triomphe"] }
 itertools = "0.15"

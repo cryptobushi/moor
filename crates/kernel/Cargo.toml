@@ -127,6 +127,7 @@ scraper.workspace = true
 
 # Collections & Data Structures
 ahash.workspace = true
+libm.workspace = true
 arrayvec.workspace = true
 hierarchical_hash_wheel_timer.workspace = true
 triomphe.workspace = true

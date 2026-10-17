@@ -237,7 +237,7 @@ impl Var {
                 .ok_or_else(|| E_INVARG.msg("Integer overflow"));
         }
         if let (Some(l), Some(r)) = (self.as_float(), v.as_float()) {
-            return float_result(l.powf(r));
+            return float_result(libm::pow(l, r));
         }
         self.pow_slow(v)
     }
@@ -252,7 +252,7 @@ impl Var {
                 // the exponent would round e.g. 2^53 + 1 to an even exponent and
                 // flip the sign of a negative base raised to it.
                 if r.unsigned_abs() <= (1_u64 << 53) {
-                    float_result(l.powf(r as f64))
+                    float_result(libm::pow(l, r as f64))
                 } else {
                     float_result(float_pow_int(l, r))
                 }

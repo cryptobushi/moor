@@ -52,6 +52,7 @@ papaya.workspace = true
 
 # Collections & Data Structures
 ahash.workspace = true
+libm.workspace = true
 imbl.workspace = true
 triomphe.workspace = true
 

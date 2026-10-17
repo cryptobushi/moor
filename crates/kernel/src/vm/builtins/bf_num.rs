@@ -262,19 +262,19 @@ math_fn!(
     "Usage: `float sin(num x)`\nReturns the sine of x (in radians).",
     bf_sin,
     "sin",
-    |x: f64| x.sin()
+    |x: f64| libm::sin(x)
 );
 math_fn!(
     "Usage: `float cos(num x)`\nReturns the cosine of x (in radians).",
     bf_cos,
     "cos",
-    |x: f64| x.cos()
+    |x: f64| libm::cos(x)
 );
 math_fn!(
     "Usage: `float tan(num x)`\nReturns the tangent of x (in radians).",
     bf_tan,
     "tan",
-    |x: f64| x.tan()
+    |x: f64| libm::tan(x)
 );
 
 // Functions with domain validation
@@ -290,7 +290,7 @@ math_fn_with_validation!(
     "Usage: `float asin(num x)`\nReturns the arc-sine of x, in the range [-pi/2..pi/2]. Raises E_INVARG if x is outside [-1.0..1.0].",
     bf_asin,
     "asin",
-    |x: f64| x.asin(),
+    |x: f64| libm::asin(x),
     |x: f64| (-1.0..=1.0).contains(&x),
     "asin() takes a number between -1 and 1"
 );
@@ -298,7 +298,7 @@ math_fn_with_validation!(
     "Usage: `float acos(num x)`\nReturns the arc-cosine of x, in the range [0..pi]. Raises E_INVARG if x is outside [-1.0..1.0].",
     bf_acos,
     "acos",
-    |x: f64| x.acos(),
+    |x: f64| libm::acos(x),
     |x: f64| (-1.0..=1.0).contains(&x),
     "acos() takes a number between -1 and 1"
 );
@@ -314,12 +314,12 @@ fn bf_atan(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
     if bf_args.args.len() == 1 {
         // Single argument: regular atan
         let x = numeric_arg(&bf_args.args[0])?;
-        math_result(x.atan())
+        math_result(libm::atan(x))
     } else {
         // Two arguments: atan2(y, x) - args[0] is y, args[1] is x
         let y = numeric_arg(&bf_args.args[0])?;
         let x = numeric_arg(&bf_args.args[1])?;
-        math_result(y.atan2(x))
+        math_result(libm::atan2(y, x))
     }
 }
 
@@ -328,19 +328,19 @@ math_fn!(
     "Usage: `float sinh(num x)`\nReturns the hyperbolic sine of x.",
     bf_sinh,
     "sinh",
-    |x: f64| x.sinh()
+    |x: f64| libm::sinh(x)
 );
 math_fn!(
     "Usage: `float cosh(num x)`\nReturns the hyperbolic cosine of x.",
     bf_cosh,
     "cosh",
-    |x: f64| x.cosh()
+    |x: f64| libm::cosh(x)
 );
 math_fn!(
     "Usage: `float tanh(num x)`\nReturns the hyperbolic tangent of x.",
     bf_tanh,
     "tanh",
-    |x: f64| x.tanh()
+    |x: f64| libm::tanh(x)
 );
 
 // Exponential and logarithmic functions
@@ -348,13 +348,13 @@ math_fn!(
     "Usage: `float exp(num x)`\nReturns e raised to the power of x.",
     bf_exp,
     "exp",
-    |x: f64| x.exp()
+    |x: f64| libm::exp(x)
 );
 math_fn_with_validation!(
     "Usage: `float log(num x)`\nReturns the natural logarithm of x. Raises E_INVARG if x is not positive.",
     bf_log,
     "log",
-    |x: f64| x.ln(),
+    |x: f64| libm::log(x),
     |x: f64| x > 0.0,
     "log() takes a positive number"
 );
@@ -362,7 +362,7 @@ math_fn_with_validation!(
     "Usage: `float log10(num x)`\nReturns the base-10 logarithm of x. Raises E_INVARG if x is not positive.",
     bf_log10,
     "log10",
-    |x: f64| x.log10(),
+    |x: f64| libm::log10(x),
     |x: f64| x > 0.0,
     "log10() takes a positive number"
 );
@@ -429,7 +429,7 @@ math_fn!(
     "Usage: `float cbrt(num x)`\nReturns the cube root of x.",
     bf_cbrt,
     "cbrt",
-    |x: f64| x.cbrt()
+    |x: f64| libm::cbrt(x)
 );
 math_fn!(
     "Usage: `float fract(num x)`\nReturns the fractional part of x (x - trunc(x)).",
@@ -453,19 +453,19 @@ math_fn!(
     "Usage: `float exp2(num x)`\nReturns 2 raised to the power of x.",
     bf_exp2,
     "exp2",
-    |x: f64| x.exp2()
+    |x: f64| libm::exp2(x)
 );
 math_fn!(
     "Usage: `float expm1(num x)`\nReturns e^x - 1 in a way that is accurate even when x is close to zero.",
     bf_expm1,
     "expm1",
-    |x: f64| x.exp_m1()
+    |x: f64| libm::expm1(x)
 );
 math_fn_with_validation!(
     "Usage: `float log2(num x)`\nReturns the base-2 logarithm of x. Raises E_INVARG if x is not positive.",
     bf_log2,
     "log2",
-    |x: f64| x.log2(),
+    |x: f64| libm::log2(x),
     |x: f64| x > 0.0,
     "log2() takes a positive number"
 );
@@ -473,7 +473,7 @@ math_fn_with_validation!(
     "Usage: `float ln1p(num x)`\nReturns ln(1+x) in a way that is accurate even when x is close to zero. Raises E_INVARG if x <= -1.",
     bf_ln1p,
     "ln1p",
-    |x: f64| x.ln_1p(),
+    |x: f64| libm::log1p(x),
     |x: f64| x > -1.0,
     "ln1p() takes a number greater than -1"
 );
@@ -483,13 +483,13 @@ math_fn!(
     "Usage: `float asinh(num x)`\nReturns the inverse hyperbolic sine of x.",
     bf_asinh,
     "asinh",
-    |x: f64| x.asinh()
+    |x: f64| libm::asinh(x)
 );
 math_fn_with_validation!(
     "Usage: `float acosh(num x)`\nReturns the inverse hyperbolic cosine of x. Raises E_INVARG if x < 1.",
     bf_acosh,
     "acosh",
-    |x: f64| x.acosh(),
+    |x: f64| libm::acosh(x),
     |x: f64| x >= 1.0,
     "acosh() takes a number >= 1"
 );
@@ -497,7 +497,7 @@ math_fn_with_validation!(
     "Usage: `float atanh(num x)`\nReturns the inverse hyperbolic tangent of x. Raises E_INVARG if |x| >= 1.",
     bf_atanh,
     "atanh",
-    |x: f64| x.atanh(),
+    |x: f64| libm::atanh(x),
     |x: f64| x.abs() < 1.0,
     "atanh() takes a number with absolute value less than 1"
 );
