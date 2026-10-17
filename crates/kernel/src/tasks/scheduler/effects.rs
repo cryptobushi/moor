@@ -14,10 +14,15 @@
 //! Pending effects belong to the active transaction attempt. Removing that attempt
 //! drops unpublished effects. Publication consumes them before a new attempt starts.
 
-use super::lifecycle::TaskLifecycle;
-use crate::tasks::schedule_q::{PendingCreate, ScheduleId};
-use moor_common::tasks::TaskId;
-use moor_var::Var;
+use super::{Scheduler, lifecycle::TaskLifecycle};
+use crate::tasks::{
+    TaskStart,
+    schedule_q::{PendingCreate, ScheduleId},
+};
+use moor_common::tasks::{Session, TaskId};
+use moor_var::{Obj, SYSTEM_OBJECT, Var};
+use std::sync::Arc;
+use tracing::error;
 
 /// A schedule mutation a task has asked for but not yet committed. Flushed to
 /// the `ScheduleQ` when the task commits, discarded on rollback or conflict
@@ -29,15 +34,29 @@ enum PendingScheduleOp {
     Stop(ScheduleId),
 }
 
+/// A `force_input()` command held until its caller commits (deterministic mode, audit S10). The
+/// task id is allocated at the call, so the builtin can return it.
+pub(crate) struct DeferredInput {
+    pub(crate) task_id: TaskId,
+    pub(crate) who: Obj,
+    pub(crate) line: String,
+    pub(crate) session: Arc<dyn Session>,
+}
+
 #[derive(Default)]
 pub(crate) struct PendingTaskEffects {
     messages: Vec<(TaskId, Var)>,
     schedules: Vec<PendingScheduleOp>,
+    inputs: Vec<DeferredInput>,
 }
 
 impl PendingTaskEffects {
     pub(crate) fn send(&mut self, target: TaskId, value: Var) {
         self.messages.push((target, value));
+    }
+
+    pub(crate) fn force_input(&mut self, input: DeferredInput) {
+        self.inputs.push(input);
     }
 
     pub(crate) fn messages_for(&self, target: TaskId) -> usize {
@@ -66,7 +85,7 @@ impl PendingTaskEffects {
         self.schedules.push(PendingScheduleOp::Stop(id));
     }
 
-    fn publish(self, lifecycle: &mut TaskLifecycle) {
+    fn publish(self, lifecycle: &mut TaskLifecycle, scheduler: &Scheduler) {
         // Schedules become visible before messages, preserving boundary ordering.
         let now = std::time::SystemTime::now();
         for op in self.schedules {
@@ -85,14 +104,37 @@ impl PendingTaskEffects {
         for (target, value) in self.messages {
             lifecycle.task_q.deliver_message(target, value);
         }
+        // Forced commands enter the run queue in call order, after the commit that made them.
+        for input in self.inputs {
+            let task_start = TaskStart::StartCommandVerb {
+                handler_object: SYSTEM_OBJECT,
+                player: input.who,
+                command: input.line,
+            };
+            if let Err(e) = scheduler.submit_task(
+                lifecycle,
+                input.task_id,
+                &input.who,
+                &input.who,
+                task_start,
+                None,
+                input.session,
+            ) {
+                error!(
+                    ?e,
+                    task_id = input.task_id,
+                    "Could not start deferred force_input task"
+                );
+            }
+        }
     }
 }
 
 impl TaskLifecycle {
-    pub(crate) fn publish_task_effects(&mut self, task_id: TaskId) {
+    pub(crate) fn publish_task_effects(&mut self, task_id: TaskId, scheduler: &Scheduler) {
         if let Some(task) = self.task_q.active.get_mut(&task_id) {
             let effects = std::mem::take(&mut task.effects);
-            effects.publish(self);
+            effects.publish(self, scheduler);
         }
     }
 

@@ -136,7 +136,7 @@ impl SuspensionTransition {
         }
     }
 
-    fn finish(self, lc: &mut TaskLifecycle) -> Option<Box<Task>> {
+    fn finish(self, lc: &mut TaskLifecycle, scheduler: &Scheduler) -> Option<Box<Task>> {
         if !self.check_running(lc) {
             return None;
         }
@@ -147,7 +147,7 @@ impl SuspensionTransition {
                 .send_task_result(task_id, Err(TaskAbortedCancelled));
             return None;
         }
-        lc.publish_task_effects(task_id);
+        lc.publish_task_effects(task_id, scheduler);
         Some(self.task)
     }
 }
@@ -175,7 +175,7 @@ impl Scheduler {
         }
 
         let mut lc = self.lifecycle.lock();
-        let Some(task) = transition.finish(&mut lc) else {
+        let Some(task) = transition.finish(&mut lc, self) else {
             return;
         };
         // And insert into the suspended list.
@@ -361,7 +361,7 @@ impl Scheduler {
         }
 
         let mut lc = self.lifecycle.lock();
-        let Some(task) = transition.finish(&mut lc) else {
+        let Some(task) = transition.finish(&mut lc, self) else {
             return;
         };
         let active = lc

@@ -135,7 +135,7 @@ fn removed_attempt_cannot_publish_effects_through_replacement() {
     insert_active_task(&scheduler, task_id, session);
     assert!(!scheduler.handle_schedule_valid(task_id, schedule_id));
     let mut lc = scheduler.lifecycle.lock();
-    lc.publish_task_effects(task_id);
+    lc.publish_task_effects(task_id, &scheduler);
     assert!(lc.task_q.drain_messages(target_id).is_empty());
     assert!(!lc.schedule_q.is_valid(schedule_id));
 }

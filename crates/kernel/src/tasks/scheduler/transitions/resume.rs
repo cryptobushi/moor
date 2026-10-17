@@ -32,6 +32,7 @@ use crate::{
         sched_counters,
         scheduler::{
             ResumeAction, Scheduler,
+            effects::DeferredInput,
             lifecycle::{SchedulerState, TaskLifecycle},
         },
         workers::WorkerResponse,
@@ -336,14 +337,29 @@ impl Scheduler {
             };
             task.session.clone().fork().unwrap()
         };
+        let new_task_id = lc.next_task_id;
+        lc.next_task_id += 1;
+
+        // Deterministic mode (audit S10): the command is queued when this task commits, not
+        // now, and a rolled-back caller queues nothing.
+        if self.is_manual() {
+            let Some(task) = lc.task_q.running_dispatch_mut(dispatch) else {
+                return Err(E_INVIND.msg("Task not found"));
+            };
+            task.effects.force_input(DeferredInput {
+                task_id: new_task_id,
+                who,
+                line,
+                session: new_session,
+            });
+            return Ok(new_task_id);
+        }
+
         let task_start = TaskStart::StartCommandVerb {
             handler_object: SYSTEM_OBJECT,
             player: who,
             command: line,
         };
-
-        let new_task_id = lc.next_task_id;
-        lc.next_task_id += 1;
         let result = self.submit_task(
             &mut lc,
             new_task_id,

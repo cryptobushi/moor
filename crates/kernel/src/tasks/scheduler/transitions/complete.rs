@@ -147,7 +147,7 @@ impl Scheduler {
         if !completion.is_current(&lc) {
             return;
         }
-        lc.publish_task_effects(task_id);
+        lc.publish_task_effects(task_id, self);
         lc.task_q.remove_message_queue(task_id);
         completion.finish(&mut lc);
         lc.settle_schedule_firings();
@@ -230,7 +230,7 @@ impl Scheduler {
             return;
         }
         // The database commit already succeeded. Preserve publication even if session commit fails.
-        lc.publish_task_effects(task_id);
+        lc.publish_task_effects(task_id, self);
         lc.task_q.remove_message_queue(task_id);
         match session_result {
             Ok(()) => completion.finish(&mut lc),
@@ -292,7 +292,7 @@ impl Scheduler {
                     if mutations_made {
                         lc.last_mutation_timestamp = Some(timestamp);
                     }
-                    lc.publish_task_effects(task_id);
+                    lc.publish_task_effects(task_id, self);
                 }
                 TaskLimitDisposition::Rollback => lc.discard_task_effects(task_id),
             }
@@ -463,7 +463,7 @@ impl Scheduler {
         if !completion.is_current(&lc) {
             return;
         }
-        lc.publish_task_effects(task_id);
+        lc.publish_task_effects(task_id, self);
         lc.task_q.remove_message_queue(task_id);
         completion.finish(&mut lc);
         lc.settle_schedule_firings();

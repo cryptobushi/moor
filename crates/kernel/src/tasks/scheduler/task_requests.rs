@@ -631,7 +631,7 @@ impl Scheduler {
             if !lc.task_q.is_running_dispatch(dispatch) {
                 return Err(SchedulerError::CouldNotStartTask);
             }
-            lc.publish_task_effects(dispatch.task_id());
+            lc.publish_task_effects(dispatch.task_id(), self);
         }
 
         let transaction = self
