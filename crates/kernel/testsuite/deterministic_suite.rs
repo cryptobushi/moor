@@ -1170,3 +1170,142 @@ fn ordinal_matching_follows_object_id_order() {
     );
     assert_eq!(picked, v_list(&[v_int(1), v_int(1), v_int(1)]));
 }
+
+/// Audit H2 and H3: the order of symbol-keyed maps and of lambda keys must not depend on the order
+/// in which this process interned symbols or on where the allocator put a program.
+mod ordering {
+    use std::cmp::Ordering;
+
+    use moor_var::{Symbol, Var, v_list, v_sym};
+
+    use super::Det;
+
+    /// Interned in descending order on purpose, so first-intern order is the reverse of string order.
+    const REVERSED: [&str; 6] = [
+        "s0h2_zulu",
+        "s0h2_yankee",
+        "s0h2_mike",
+        "s0h2_bravo",
+        "s0h2_alpha",
+        "s0h2_aaa",
+    ];
+
+    const LAMBDA_KEYS: &str = "l1 = {x} => x + 1; l2 = {x} => x * 2; l3 = {x} => x - 1; \
+         return toliteral(mapvalues([l3 -> 3, l1 -> 1, l2 -> 2]));";
+
+    #[test]
+    fn symbols_order_by_folded_string_not_intern_order() {
+        let mut syms: Vec<Symbol> = REVERSED.iter().map(|s| Symbol::mk(s)).collect();
+        syms.sort();
+        let names: Vec<_> = syms.iter().map(|s| s.as_string()).collect();
+        let mut expected: Vec<_> = REVERSED.iter().map(|s| s.to_string()).collect();
+        expected.sort();
+        assert_eq!(names, expected);
+    }
+
+    #[test]
+    fn symbols_that_differ_only_in_case_are_equal_in_order() {
+        let (a, b) = (Symbol::mk("S0h2_Case"), Symbol::mk("s0h2_case"));
+        assert_eq!(a.cmp(&b), Ordering::Equal);
+    }
+
+    #[test]
+    fn symbol_order_ignores_case_of_the_spelling() {
+        let (upper, lower) = (Symbol::mk("S0H2_UPPER_B"), Symbol::mk("s0h2_upper_a"));
+        assert_eq!(lower.cmp(&upper), Ordering::Less);
+    }
+
+    #[test]
+    fn symbol_keyed_map_iterates_in_string_order() {
+        let det = Det::start(1, 1_700_000_000, 1);
+        let keys = det.run(
+            "m = []; for s in ({'s0h2_zulu, 's0h2_alpha, 's0h2_mike}) m[s] = 1; endfor return mapkeys(m);",
+        );
+        let expect = v_list(&[v_sym("s0h2_alpha"), v_sym("s0h2_mike"), v_sym("s0h2_zulu")]);
+        assert_eq!(keys, expect);
+    }
+
+    #[test]
+    fn lambda_key_order_is_independent_of_heap_layout() {
+        let det = Det::start(1, 1_700_000_000, 1);
+        let first = det.run(LAMBDA_KEYS);
+        let _junk: Vec<Vec<u8>> = (0..5000).map(|i| vec![0u8; 8 + i % 200]).collect();
+        let second = det.run(LAMBDA_KEYS);
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn lambda_order_is_antisymmetric_over_distinct_lambdas() {
+        let det = Det::start(1, 1_700_000_000, 1);
+        let r = det.run("a = {x} => x + 1; b = {x} => x * 2; return {a, b};");
+        let l = r.as_list().expect("list");
+        let items: Vec<Var> = l.iter().collect();
+        let (a, b) = (&items[0], &items[1]);
+        assert_ne!(a.cmp(&b), Ordering::Equal);
+        assert_eq!(a.cmp(&b), b.cmp(&a).reverse());
+    }
+
+    /// Child half of the cross-process test. Interns the pool rotated by `RW_INTERN_SEED`, holds a
+    /// seed-dependent amount of heap so program allocations land elsewhere, then prints the
+    /// order-sensitive results.
+    #[test]
+    #[ignore = "run by symbol_and_lambda_order_is_identical_across_processes"]
+    fn order_child() {
+        let seed: usize = std::env::var("RW_INTERN_SEED")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        const POOL: [&str; 8] = [
+            "zeta", "alpha", "mid", "beta", "omega", "gamma", "delta", "kappa",
+        ];
+        for i in 0..POOL.len() {
+            Symbol::mk(POOL[(i + seed) % POOL.len()]);
+        }
+        let _junk: Vec<Vec<u8>> = (0..(seed * 37 + 1))
+            .map(|i| vec![0u8; 16 + i % 90])
+            .collect();
+        let det = Det::start(1, 1_700_000_000, 1);
+        let syms: Var = det.run(
+            "m = []; for s in ({'zeta, 'alpha, 'mid, 'beta, 'omega, 'gamma, 'delta, 'kappa}) m[s] = tostr(s); endfor return {toliteral(m), mapkeys(m)};",
+        );
+        let lam: Var = det.run(
+            "l1 = {x} => x + 1; l2 = {x} => x * 2; l3 = {x} => x - 1; l4 = {x, y} => x + y; return toliteral(mapvalues([l1 -> 1, l2 -> 2, l3 -> 3, l4 -> 4]));",
+        );
+        println!(
+            "ORDER-BEGIN\n{}\n{}\nORDER-END",
+            moor_compiler::to_literal(&syms),
+            moor_compiler::to_literal(&lam)
+        );
+    }
+
+    fn child(seed: usize) -> String {
+        let exe = std::env::current_exe().expect("test binary");
+        let output = std::process::Command::new(exe)
+            .env("RW_INTERN_SEED", seed.to_string())
+            .args([
+                "ordering::order_child",
+                "--exact",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .output()
+            .expect("run child");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let out = String::from_utf8_lossy(&output.stdout).to_string();
+        let begin = out.find("ORDER-BEGIN\n").expect("begin marker") + "ORDER-BEGIN\n".len();
+        let end = out.find("\nORDER-END").expect("end marker");
+        out[begin..end].to_string()
+    }
+
+    #[test]
+    fn symbol_and_lambda_order_is_identical_across_processes() {
+        let runs: Vec<String> = (0..8).map(child).collect();
+        assert!(runs[0].contains("alpha"), "{}", runs[0]);
+        assert!(runs.windows(2).all(|w| w[0] == w[1]), "{runs:#?}");
+    }
+}
