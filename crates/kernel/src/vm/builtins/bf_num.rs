@@ -15,6 +15,7 @@
 
 use rand::RngExt;
 
+use moor_common::deterministic;
 use moor_compiler::offset_for_builtin;
 use moor_var::{E_ARGS, E_FLOAT, E_INVARG, E_TYPE, Var, Variant, v_float, v_int, v_str};
 
@@ -118,10 +119,8 @@ fn bf_random(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
         ));
     }
 
-    let mut rng = rand::rng();
-
-    match bf_args.args.len() {
-        0 => Ok(Ret(v_int(rng.random_range(1..=i64::MAX)))),
+    let (min, max) = match bf_args.args.len() {
+        0 => (1, i64::MAX),
         1 => {
             let Variant::Int(max) = bf_args.args[0].variant() else {
                 return Err(BfErr::Code(E_TYPE));
@@ -129,7 +128,7 @@ fn bf_random(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
             if max < 1 {
                 return Err(BfErr::Code(E_INVARG));
             }
-            Ok(Ret(v_int(rng.random_range(1..=max))))
+            (1, max)
         }
         2 => {
             let Variant::Int(min) = bf_args.args[0].variant() else {
@@ -141,10 +140,15 @@ fn bf_random(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
             if min < 1 || max < min {
                 return Err(BfErr::Code(E_INVARG));
             }
-            Ok(Ret(v_int(rng.random_range(min..=max))))
+            (min, max)
         }
         _ => unreachable!(),
-    }
+    };
+
+    // The command's seeded stream in deterministic mode, the thread-local OS-seeded RNG otherwise.
+    let value = deterministic::with_rng(|rng| rng.range_inclusive(min, max))
+        .unwrap_or_else(|| rand::rng().random_range(min..=max));
+    Ok(Ret(v_int(value)))
 }
 
 /// Usage: `str floatstr(float x, int precision [, bool scientific])`

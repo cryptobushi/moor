@@ -144,3 +144,45 @@ fn event_timestamp_is_block_time() {
         .as_secs();
     assert_eq!(secs, 1_700_001_000);
 }
+
+/// What the stream for `command` of a block seeded with `seed` yields first, for `random(max)`.
+fn first_random(seed: u8, command: u64, max: i64) -> Var {
+    let mut stream = deterministic::RngStream::new(&[seed; 32], command);
+    Var::from(stream.range_inclusive(1, max))
+}
+
+#[test]
+fn random_draws_from_the_command_stream() {
+    let det = Det::start(4, 1_700_002_000, 9);
+    assert_eq!(
+        det.run("return random(1000000);"),
+        first_random(9, 1, 1_000_000)
+    );
+}
+
+#[test]
+fn random_differs_between_commands_of_a_block() {
+    let det = Det::start(4, 1_700_002_000, 9);
+    let first = det.run("return random(1000000000);");
+    let second = det.run("return random(1000000000);");
+    assert_ne!(first, second);
+}
+
+#[test]
+fn random_replays_when_the_block_is_replayed() {
+    let det = Det::start(4, 1_700_002_000, 9);
+    let first = det.run("return random();");
+    deterministic::set_block(BlockContext {
+        height: 4,
+        timestamp: 1_700_002_000,
+        seed: [9; 32],
+    });
+    assert_eq!(det.run("return random();"), first);
+}
+
+#[test]
+fn random_with_a_range_stays_within_it() {
+    let det = Det::start(4, 1_700_002_000, 9);
+    let value = det.run("return random(10, 12);");
+    assert!(matches!(value.as_integer(), Some(10..=12)));
+}
