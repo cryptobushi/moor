@@ -527,6 +527,15 @@ pub fn run(runtime_config: DaemonRuntimeConfig, runtime: DaemonRuntime) -> Resul
         trace_output_path,
     } = runtime_config;
     config.validate().map_err(|e| eyre!(e))?;
+    // Deterministic mode runs the scheduler on the manual executor: workers are off (audit E1),
+    // and every client request, host-side write included, goes through its single sequencer
+    // thread (audit S4, S11).
+    let workers_enabled = if config.deterministic.is_on() && workers_enabled {
+        info!("Deterministic mode: workers are disabled");
+        false
+    } else {
+        workers_enabled
+    };
     let DaemonKeys {
         private_key,
         public_key,
