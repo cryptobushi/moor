@@ -33,7 +33,11 @@ use moor_common::model::{
 use moor_compiler::ObjFileContext;
 use moor_compiler::{CompileOptions, ObjectDefinition};
 use moor_var::{NOTHING, Obj, Symbol, Var};
-use std::{collections::HashMap, path::Path, time::Instant};
+use std::{
+    collections::{BTreeMap, HashMap},
+    path::Path,
+    time::Instant,
+};
 use tracing::info;
 
 /// Constants supplied to objdef parsing.
@@ -56,7 +60,10 @@ pub enum Constants {
 /// parent/location/owner references can resolve across the incoming set. Direct imports apply
 /// supplied values; reviewed program updates use the separate comparison and review APIs.
 pub struct ObjectDefinitionLoader<'a> {
-    object_definitions: HashMap<Obj, (String, ObjectDefinition)>,
+    /// Ordered by object id. Every load phase walks this map, and defining a verb or property takes
+    /// the next derived definition id in deterministic mode, so the walk order decides the storage
+    /// keys: a hash map here gave each process different keys for the same core.
+    object_definitions: BTreeMap<Obj, (String, ObjectDefinition)>,
     parsed_constants: HashMap<Symbol, Var>,
     loader: &'a mut dyn LoaderInterface,
     restore_tracking: bool,
@@ -167,7 +174,7 @@ impl<'a> ObjectDefinitionLoader<'a> {
     /// Create a loader that applies objdefs through the supplied database loader interface.
     pub fn new(loader: &'a mut dyn LoaderInterface) -> Self {
         Self {
-            object_definitions: HashMap::new(),
+            object_definitions: BTreeMap::new(),
             parsed_constants: HashMap::new(),
             loader,
             restore_tracking: false,
@@ -317,7 +324,7 @@ impl<'a> ObjectDefinitionLoader<'a> {
         _options: &ObjDefLoaderOptions,
     ) -> Result<(), ObjdefLoaderError> {
         let (object_definitions, constants) = objdef_set.into_parts();
-        self.object_definitions = object_definitions;
+        self.object_definitions = object_definitions.into_iter().collect();
         self.create_placeholder_objects()?;
         self.parsed_constants = constants;
         Ok(())
@@ -866,8 +873,11 @@ impl<'a> ObjectDefinitionLoader<'a> {
             return Ok(());
         }
 
-        // Extract the constant names from the context (these come from constants.moo).
-        for (name, value) in self.parsed_constants.iter() {
+        // Extract the constant names from the context (these come from constants.moo). In name
+        // order, so that when two constants name one object the same one wins in every process.
+        let mut constants: Vec<_> = self.parsed_constants.iter().collect();
+        constants.sort_by_cached_key(|(name, _)| name.as_arc_str().to_string());
+        for (name, value) in constants {
             let Some(obj) = value.as_object() else {
                 continue;
             };
