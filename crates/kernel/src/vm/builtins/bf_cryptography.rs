@@ -39,6 +39,7 @@ use tracing::{error, warn};
 use crate::vm::builtins::{
     BfCallState, BfErr, BfRet, BfRet::Ret, BuiltinFunction, unix_crypt_compat,
 };
+use moor_common::deterministic;
 use moor_compiler::{offset_for_builtin, to_literal};
 use moor_var::{
     E_ARGS, E_INVARG, E_TYPE, Symbol, Var, Variant, v_binary, v_error, v_float, v_int, v_list,
@@ -1327,9 +1328,11 @@ fn bf_random_bytes(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
         ));
     }
 
-    let mut rng = rand::rng();
     let mut bytes = vec![0u8; count as usize];
-    rng.fill(&mut bytes[..]);
+    // The command's seeded stream in deterministic mode, OS-seeded randomness otherwise.
+    if deterministic::with_rng(|rng| rng.fill_bytes(&mut bytes)).is_none() {
+        rand::rng().fill(&mut bytes[..]);
+    }
 
     Ok(Ret(v_binary(bytes)))
 }

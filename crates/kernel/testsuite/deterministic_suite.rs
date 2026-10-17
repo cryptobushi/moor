@@ -186,3 +186,11 @@ fn random_with_a_range_stays_within_it() {
     let value = det.run("return random(10, 12);");
     assert!(matches!(value.as_integer(), Some(10..=12)));
 }
+
+#[test]
+fn random_bytes_come_from_the_command_stream() {
+    let det = Det::start(5, 1_700_003_000, 4);
+    let mut expected = vec![0u8; 20];
+    deterministic::RngStream::new(&[4; 32], 1).fill_bytes(&mut expected);
+    assert_eq!(det.run("return random_bytes(20);"), Var::from(expected));
+}
