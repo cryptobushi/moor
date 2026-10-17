@@ -19,7 +19,7 @@ use crate::{
         BfCallState, BfErr, BfRet, BfRet::Ret, BuiltinFunction, hash, world_state_bf_err,
     },
 };
-use moor_common::util::write_i64_decimal;
+use moor_common::{deterministic, util::write_i64_decimal};
 use moor_compiler::{ObjDefParseError, offset_for_builtin, parse_literal_value, to_literal};
 use moor_var::{
     ByteSized, E_ARGS, E_FLOAT, E_INVARG, E_MAXREC, E_RANGE, E_TYPE, ValueDiffOptions, Variant,
@@ -617,15 +617,18 @@ fn bf_error_message(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
 }
 
 /// Usage: `str uuid([int high, int low])`
-/// With no arguments, generates a new time-ordered v7 UUID. With two integer arguments,
+/// With no arguments, generates a new time-ordered v7 UUID (in deterministic mode, a v8 UUID
+/// derived from the block height, command index and a per-command counter). With two integer arguments,
 /// reconstructs a UUID from its high and low 64-bit components (big-endian).
 /// Raises E_ARGS if the argument count is not 0 or 2, and E_TYPE if either argument
 /// is not an integer.
 fn bf_uuid(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
     match bf_args.args.len() {
         0 => {
-            // Generate a new v7 UUID
-            let uuid = Uuid::now_v7();
+            // A new v7 UUID; in deterministic mode a v8 UUID derived from
+            // (height, command, uuid counter).
+            let uuid =
+                deterministic::next_id(deterministic::IdDomain::Uuid).unwrap_or_else(Uuid::now_v7);
             Ok(Ret(v_str(uuid.to_string().as_str())))
         }
         2 => {

@@ -20,7 +20,7 @@ use moor_common::{
     tasks::NarrativeEvent,
 };
 use moor_db::Database;
-use moor_var::{E_PERM, Var, v_float, v_int};
+use moor_var::{E_PERM, Var, v_float, v_int, v_list};
 
 use crate::common::{create_db, run_as_verb};
 
@@ -263,5 +263,40 @@ fn paseto_make_local_is_refused() {
     assert_eq!(
         det.raised("return paseto_make_local({{\"a\", 1}});"),
         E_PERM
+    );
+}
+
+#[test]
+fn uuid_derives_from_height_command_and_counter() {
+    let det = Det::start(7, 1_700_005_000, 3);
+    let expected = deterministic::derive_id(deterministic::IdDomain::Uuid, 7, 1, 0);
+    assert_eq!(det.run("return uuid();"), Var::from(expected.to_string()));
+}
+
+#[test]
+fn uuid_counter_advances_within_a_command() {
+    let det = Det::start(7, 1_700_005_000, 3);
+    let both = det.run("return {uuid(), uuid()};");
+    let expected = |counter| {
+        Var::from(
+            deterministic::derive_id(deterministic::IdDomain::Uuid, 7, 1, counter).to_string(),
+        )
+    };
+    assert_eq!(both, v_list(&[expected(0), expected(1)]));
+}
+
+#[test]
+fn uuid_ignores_the_block_seed() {
+    let first = Det::start(7, 1_700_005_000, 3).run("return uuid();");
+    let second = Det::start(7, 1_700_005_000, 200).run("return uuid();");
+    assert_eq!(first, second);
+}
+
+#[test]
+fn uuid_rebuilt_from_integers_is_unchanged() {
+    let det = Det::start(7, 1_700_005_000, 3);
+    assert_eq!(
+        det.run("return uuid(1, 2);"),
+        Var::from("00000000-0000-0001-0000-000000000002")
     );
 }
