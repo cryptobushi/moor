@@ -5681,19 +5681,23 @@ mod tests {
         const REPS: u32 = 20;
         let db = test_db();
         let mut tx = db.start_transaction();
-        let mk = |tx: &mut crate::engine::moor_db::WorldStateTransaction, owner, loc, name: &str| {
-            tx.create_object(
-                ObjectKind::NextObjid,
-                ObjAttrs::new(owner, NOTHING, loc, BitEnum::new_with(ObjFlag::Read), name),
-            )
-            .unwrap()
-        };
+        let mk =
+            |tx: &mut crate::engine::moor_db::WorldStateTransaction, owner, loc, name: &str| {
+                tx.create_object(
+                    ObjectKind::NextObjid,
+                    ObjAttrs::new(owner, NOTHING, loc, BitEnum::new_with(ObjFlag::Read), name),
+                )
+                .unwrap()
+            };
         let room = mk(&mut tx, NOTHING, NOTHING, "room");
         let player = mk(&mut tx, NOTHING, room, "player");
         let things: Vec<Obj> = (0..N).map(|_| mk(&mut tx, player, room, "sword")).collect();
         assert!(matches!(tx.commit().unwrap(), CommitResult::Success { .. }));
         let report = |label: &str, total: std::time::Duration, reps: u32| {
-            println!("PERF {label}: {:.1} us", total.as_secs_f64() * 1e6 / reps as f64);
+            println!(
+                "PERF {label}: {:.1} us",
+                total.as_secs_f64() * 1e6 / reps as f64
+            );
         };
 
         let mut total = std::time::Duration::ZERO;
@@ -5744,7 +5748,11 @@ mod tests {
             let tx = db.start_transaction();
             let ws = DbWorldState { tx };
             let env = WsMatchEnv::new(&ws, player);
-            let m = ComplexObjectNameMatcher { env, player, fuzzy_threshold: 0.0 };
+            let m = ComplexObjectNameMatcher {
+                env,
+                player,
+                fuzzy_threshold: 0.0,
+            };
             let t = Instant::now();
             let r = m.match_object("5000th sword");
             total += t.elapsed();
