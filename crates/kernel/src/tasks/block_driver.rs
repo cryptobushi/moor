@@ -46,12 +46,20 @@
 //! nothing and adds one [`BlockEventKind::Rejected`] entry; delegations and revocations add one
 //! [`BlockEventKind::Sessions`] entry. Either entry follows the input's task events.
 //! [`BlockInput::SequencerDisconnect`] is the authority-free disconnect.
+//!
+//! # State root
+//!
+//! After the boundary cancellation, `end_block` takes the state root of the committed state (`moor_db::state_root`,
+//! state encoding v1) with its per-relation hashes, unless disabled with
+//! [`BlockDriver::set_state_root_at_end_block`]. [`BlockDriver::state_root`] and
+//! [`BlockDriver::canonical_relation`] read the same thing on demand.
 
 use crate::tasks::{
     TaskHandle,
     envelope_admission::{AdmissionRejection, Admitted, take_result},
     scheduler::Scheduler,
 };
+use moor_common::model::WorldStateError;
 use moor_common::{
     deterministic::{self, BlockContext},
     envelope::EnvelopeKind,
@@ -59,6 +67,7 @@ use moor_common::{
     tasks::{ConnectionDetails, NarrativeEvent, SchedulerError, Session, SessionError, TaskId},
 };
 use moor_compiler::compile;
+use moor_db::state_root::{CanonicalRelation, StateRoot};
 use moor_var::{List, Obj, SYSTEM_OBJECT, Symbol, Var, v_empty_str, v_obj, v_str};
 use std::sync::{Arc, Mutex, MutexGuard};
 use uuid::Uuid;
@@ -153,6 +162,9 @@ pub struct BlockOutput {
     pub abandoned: Vec<TaskId>,
     /// Transaction conflicts seen in this block. Serial execution makes this zero.
     pub conflicts: u64,
+    /// The state root after the block, with its per-relation hashes. `None` when disabled with
+    /// [`BlockDriver::set_state_root_at_end_block`].
+    pub state_root: Option<Result<StateRoot, WorldStateError>>,
 }
 
 #[derive(Default)]
@@ -331,6 +343,7 @@ pub struct BlockDriver {
     outcomes: Vec<InputOutcome>,
     conflicts_at_block_start: u64,
     job_budget: usize,
+    root_at_end_block: bool,
 }
 
 impl BlockDriver {
@@ -346,6 +359,7 @@ impl BlockDriver {
             outcomes: Vec::new(),
             conflicts_at_block_start,
             job_budget: DEFAULT_JOB_BUDGET,
+            root_at_end_block: true,
         }
     }
 
@@ -358,6 +372,22 @@ impl BlockDriver {
     /// Change the per-input job budget.
     pub fn set_job_budget(&mut self, budget: usize) {
         self.job_budget = budget;
+    }
+
+    /// Whether `end_block` computes the state root (on by default). The root is O(state).
+    pub fn set_state_root_at_end_block(&mut self, enabled: bool) {
+        self.root_at_end_block = enabled;
+    }
+
+    /// The state root of the committed state now. Between blocks this is the root of the last
+    /// sealed block.
+    pub fn state_root(&self) -> Result<StateRoot, WorldStateError> {
+        self.scheduler.database.state_root()
+    }
+
+    /// The canonical encoding of one relation of the committed state (the dump endpoint).
+    pub fn canonical_relation(&self, name: &str) -> Result<CanonicalRelation, WorldStateError> {
+        self.scheduler.database.canonical_relation(name)
     }
 
     /// Start a block: install its context (time, seed; command index 0) and empty the batch.
@@ -513,12 +543,14 @@ impl BlockDriver {
         // Cancelling can release `wait_task` dependants; none may run past the boundary.
         self.scheduler.run_until_quiescent(self.job_budget);
         let events = std::mem::take(&mut lock(&self.batch).events);
+        let state_root = self.root_at_end_block.then(|| self.state_root());
         BlockOutput {
             block: self.block,
             outcomes: std::mem::take(&mut self.outcomes),
             events,
             abandoned,
             conflicts: self.scheduler.deterministic_conflicts() - self.conflicts_at_block_start,
+            state_root,
         }
     }
 
