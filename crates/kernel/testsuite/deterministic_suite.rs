@@ -437,3 +437,718 @@ fn contents_are_listed_in_object_id_order() {
     );
     assert_eq!(sorted, v_int(1));
 }
+
+// --- Manual executor and block driver (S0-4) ---------------------------------------------------
+
+mod executor {
+    use std::sync::{Arc, Mutex as StdMutex};
+
+    use moor_common::{
+        deterministic::{self, BlockContext, DeterministicMode},
+        tasks::{
+            Event, NarrativeEvent, NoopClientSession, NoopSystemControl, Session, SessionError,
+            SessionFactory,
+        },
+    };
+    use moor_compiler::to_literal;
+    use moor_kernel::{
+        config::Config,
+        tasks::{
+            NoopTasksDb,
+            block_driver::{BlockDriver, BlockEvent, BlockEventKind, BlockInput, BlockOutput},
+            scheduler::Scheduler,
+        },
+    };
+    use moor_var::{Obj, Var, v_int, v_str};
+
+    use super::{LOCK, create_db};
+
+    const WIZARD: Obj = Obj::mk_id(3);
+
+    struct Factory;
+    impl SessionFactory for Factory {
+        fn mk_background_session(
+            self: Arc<Self>,
+            _player: &Obj,
+        ) -> Result<Arc<dyn Session>, SessionError> {
+            Ok(Arc::new(NoopClientSession::new()))
+        }
+    }
+
+    /// A fresh database and a deterministic scheduler under a block driver. Holds the process lock.
+    struct World {
+        driver: Option<BlockDriver>,
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl World {
+        fn start() -> Self {
+            let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            deterministic::disable();
+            let mode = DeterministicMode::on();
+            deterministic::configure(&mode);
+            let scheduler = Scheduler::new(
+                semver::Version::new(0, 1, 0),
+                create_db(),
+                Box::new(NoopTasksDb {}),
+                Arc::new(Config {
+                    deterministic: mode,
+                    ..Config::default()
+                }),
+                Arc::new(NoopSystemControl::default()),
+                None,
+                None,
+            );
+            assert!(scheduler.is_manual());
+            let driver = scheduler
+                .start_block_driver(Arc::new(Factory))
+                .expect("start block driver");
+            Self {
+                driver: Some(driver),
+                _guard: guard,
+            }
+        }
+
+        fn driver(&mut self) -> &mut BlockDriver {
+            self.driver.as_mut().expect("driver")
+        }
+
+        fn block(&mut self, height: u64, evals: &[&str]) -> BlockOutput {
+            let inputs = evals
+                .iter()
+                .map(|code| {
+                    let session: Arc<dyn Session> = Arc::new(NoopClientSession::new());
+                    (
+                        BlockInput::Eval {
+                            player: WIZARD,
+                            code: (*code).to_string(),
+                        },
+                        session,
+                    )
+                })
+                .collect();
+            self.driver().run_block(block(height), inputs)
+        }
+
+        fn eval(&mut self, code: &str) -> Var {
+            let out = self.block(1, &[code]);
+            match &out.outcomes[0].result {
+                Some(Ok(v)) => v.clone(),
+                other => panic!("eval did not return a value: {other:?}"),
+            }
+        }
+    }
+
+    impl Drop for World {
+        fn drop(&mut self) {
+            if let Some(driver) = self.driver.take() {
+                driver.shutdown().ok();
+            }
+            deterministic::disable();
+        }
+    }
+
+    fn block(height: u64) -> BlockContext {
+        BlockContext {
+            height,
+            timestamp: 1_700_000_000 + 60 * height,
+            seed: [height as u8; 32],
+        }
+    }
+
+    /// The `notify` texts of a batch, in batch order.
+    fn texts(events: &[BlockEvent]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|e| match &e.kind {
+                BlockEventKind::Narrative(ev) => match ev.event() {
+                    Event::Notify { value, .. } => value.as_string().map(str::to_string),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every field of every event, ids and timestamps included.
+    fn canonical(events: &[BlockEvent]) -> String {
+        events
+            .iter()
+            .map(|e| {
+                let body = match &e.kind {
+                    BlockEventKind::Narrative(ev) | BlockEventKind::Logged(ev) => describe(ev),
+                    BlockEventKind::System(msg) => format!("system {msg}"),
+                };
+                format!(
+                    "{} cmd={} task={:?} to={} {}",
+                    e.seq, e.command_index, e.task_id, e.player, body
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn describe(ev: &NarrativeEvent) -> String {
+        let ts = ev
+            .timestamp()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_micros())
+            .unwrap_or(0);
+        let body = match ev.event() {
+            Event::Notify { value, .. } => to_literal(&value),
+            other => format!("{other:?}"),
+        };
+        format!(
+            "id={} ts={ts} author={} {body}",
+            ev.event_id(),
+            to_literal(ev.author())
+        )
+    }
+
+    const FORK_TREE: &str = r#"
+        fork (0)
+          notify(player, "child A");
+          fork (0)
+            notify(player, "grandchild of A");
+          endfork
+        endfork
+        fork (0)
+          notify(player, "child B");
+        endfork
+        notify(player, "parent");
+        return 1;
+    "#;
+
+    #[test]
+    fn fork_zero_children_run_after_the_parent_in_creation_order() {
+        let mut world = World::start();
+        let out = world.block(1, &[FORK_TREE, "notify(player, \"next command\");"]);
+        assert_eq!(
+            texts(&out.events),
+            [
+                "parent",
+                "child A",
+                "child B",
+                "grandchild of A",
+                "next command"
+            ]
+        );
+    }
+
+    #[test]
+    fn fork_zero_events_keep_the_parent_command_index() {
+        let mut world = World::start();
+        let out = world.block(1, &[FORK_TREE, "notify(player, \"next\");"]);
+        let indices: Vec<u64> = out.events.iter().map(|e| e.command_index).collect();
+        assert_eq!(indices, [1, 1, 1, 1, 2]);
+    }
+
+    #[test]
+    fn fork_zero_child_sees_the_parent_final_commit() {
+        let mut world = World::start();
+        let out = world.block(
+            1,
+            &[
+                "add_property(#0, \"s04\", 0, {player, \"rw\"}); return 1;",
+                "fork (0) notify(player, \"child sees \" + tostr(#0.s04)); endfork #0.s04 = 42;",
+            ],
+        );
+        assert_eq!(texts(&out.events), ["child sees 42"]);
+    }
+
+    #[test]
+    fn fork_zero_ordering_is_identical_across_20_runs() {
+        let mut batches = Vec::new();
+        for _ in 0..20 {
+            let mut world = World::start();
+            let out = world.block(7, &[FORK_TREE, FORK_TREE, "return random(1000);"]);
+            assert_eq!(out.conflicts, 0);
+            batches.push(canonical(&out.events));
+        }
+        assert!(batches.windows(2).all(|w| w[0] == w[1]), "{batches:#?}");
+    }
+
+    #[test]
+    fn delayed_fork_raises_e_invarg() {
+        let mut world = World::start();
+        assert_eq!(
+            world.eval(
+                "try fork (1) endfork return 0; except (E_INVARG) return \"refused\"; endtry"
+            ),
+            v_str("refused")
+        );
+    }
+
+    #[test]
+    fn timed_suspend_raises_e_invarg() {
+        let mut world = World::start();
+        assert_eq!(
+            world.eval("try suspend(1); return 0; except (E_INVARG) return \"refused\"; endtry"),
+            v_str("refused")
+        );
+    }
+
+    #[test]
+    fn suspend_zero_continues_inline_before_forked_children() {
+        let mut world = World::start();
+        let out = world.block(
+            1,
+            &["fork (0) notify(player, \"child\"); endfork \
+               notify(player, \"before\"); suspend(0); notify(player, \"after\"); return 1;"],
+        );
+        assert_eq!(texts(&out.events), ["before", "after", "child"]);
+    }
+
+    #[test]
+    fn waiting_task_recv_raises_e_invarg() {
+        let mut world = World::start();
+        assert_eq!(
+            world.eval("try task_recv(1); return 0; except (E_INVARG) return \"refused\"; endtry"),
+            v_str("refused")
+        );
+    }
+
+    #[test]
+    fn read_raises_e_invarg() {
+        let mut world = World::start();
+        assert_eq!(
+            world.eval("try read(); return 0; except (E_INVARG) return \"refused\"; endtry"),
+            v_str("refused")
+        );
+    }
+
+    #[test]
+    fn schedule_at_raises_e_invarg() {
+        let mut world = World::start();
+        assert_eq!(
+            world.eval(
+                "try schedule_at(#0, \"x\", time() + 10); return 0; \
+                 except (E_INVARG) return \"refused\"; endtry"
+            ),
+            v_str("refused")
+        );
+    }
+
+    #[test]
+    fn indefinitely_suspended_task_is_cancelled_at_the_block_boundary() {
+        let mut world = World::start();
+        let out = world.block(1, &["fork (0) suspend(); endfork return 1;"]);
+        assert_eq!(out.abandoned.len(), 1);
+        assert!(world.driver().scheduler().suspended_task_ids().is_empty());
+    }
+
+    #[test]
+    fn resumed_task_runs_inside_the_block() {
+        let mut world = World::start();
+        let out = world.block(
+            1,
+            &[
+                "fork t (0) notify(player, \"resumed with \" + tostr(suspend())); endfork \
+                 add_property(#0, \"waiter\", t, {player, \"rw\"}); return t;",
+                "resume(#0.waiter, 5); return 1;",
+            ],
+        );
+        assert_eq!(texts(&out.events), ["resumed with 5"]);
+        assert!(out.abandoned.is_empty());
+    }
+
+    #[test]
+    fn force_input_runs_after_its_caller_commits() {
+        let mut world = World::start();
+        let out = world.block(
+            1,
+            &["force_input(player, \";notify(player, \\\"forced\\\")\"); \
+               notify(player, \"caller\"); return 1;"],
+        );
+        // The core's eval command handler also prints the eval's value after "forced".
+        assert_eq!(texts(&out.events)[..2], ["caller", "forced"]);
+    }
+
+    #[test]
+    fn force_input_from_a_rolled_back_task_runs_nothing() {
+        let mut world = World::start();
+        let out = world.block(
+            1,
+            &[
+                "force_input(player, \";notify(player, \\\"forced\\\")\"); rollback(); return 1;",
+                "notify(player, \"next\"); return 1;",
+            ],
+        );
+        assert_eq!(texts(&out.events), ["next"]);
+    }
+
+    #[test]
+    fn inputs_take_consecutive_command_indices() {
+        let mut world = World::start();
+        let out = world.block(
+            1,
+            &[
+                "return block_context()['command];",
+                "return block_context()['command];",
+            ],
+        );
+        let values: Vec<_> = out
+            .outcomes
+            .iter()
+            .map(|o| o.result.clone().map(|r| r.ok()))
+            .collect();
+        assert_eq!(values, [Some(Some(v_int(1))), Some(Some(v_int(2)))]);
+    }
+
+    #[test]
+    fn serial_execution_reports_no_conflicts() {
+        let mut world = World::start();
+        // Upstream panics ("stack underflow") on a fork inside a `for` loop in an eval frame,
+        // in both modes, so the forks are unrolled.
+        let bump = "fork (0) #0.n = #0.n + 1; endfork ";
+        let code = format!(
+            "add_property(#0, \"n\", 0, {{player, \"rw\"}}); {} return 1;",
+            bump.repeat(5)
+        );
+        let out = world.block(1, &[&code, "return #0.n;"]);
+        assert_eq!(out.conflicts, 0);
+        assert_eq!(
+            out.outcomes[1].result.clone().map(|r| r.ok()),
+            Some(Some(v_int(5)))
+        );
+    }
+
+    /// The block whose batch must match across processes: commands, forks, random, ids.
+    const PROCESS_BLOCK: &[&str] = &[
+        "add_property(#0, \"log\", {}, {player, \"rw\"}); return 1;",
+        FORK_TREE,
+        "fork (0) #0.log = {@#0.log, random(1000)}; notify(player, toliteral(#0.log)); endfork \
+         fork (0) #0.log = {@#0.log, random(1000)}; notify(player, toliteral(#0.log)); endfork \
+         fork (0) #0.log = {@#0.log, random(1000)}; notify(player, toliteral(#0.log)); endfork \
+         return 1;",
+        "notify(player, uuid()); notify(player, tostr(time())); return #0.log;",
+        "o = create(#1); move(o, #2); notify(player, tostr(o)); return o;",
+    ];
+
+    /// Child half of the cross-process test. Prints the canonical batch between markers.
+    #[test]
+    #[ignore = "run as a subprocess by block_batch_is_identical_across_processes"]
+    fn block_batch_child() {
+        let mut world = World::start();
+        let out = world.block(3, PROCESS_BLOCK);
+        assert_eq!(out.conflicts, 0);
+        println!("BATCH-BEGIN\n{}\nBATCH-END", canonical(&out.events));
+    }
+
+    fn child_batch() -> String {
+        let exe = std::env::current_exe().expect("test binary");
+        let output = std::process::Command::new(exe)
+            .args([
+                "executor::block_batch_child",
+                "--exact",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .output()
+            .expect("run child");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let begin = stdout.find("BATCH-BEGIN\n").expect("batch marker") + "BATCH-BEGIN\n".len();
+        let end = stdout.find("\nBATCH-END").expect("batch end marker");
+        stdout[begin..end].to_string()
+    }
+
+    #[test]
+    fn block_batch_is_identical_across_processes() {
+        let batches: Vec<String> = (0..5).map(|_| child_batch()).collect();
+        assert!(batches[0].lines().count() >= 10, "{}", batches[0]);
+        assert!(batches.windows(2).all(|w| w[0] == w[1]), "{batches:#?}");
+    }
+
+    // Negative control (ADR 0001 Stage 0 exit c): with deterministic mode off, the same inputs
+    // submitted concurrently to the threaded scheduler commit in a timing-dependent order.
+
+    /// Records committed `notify` texts in commit order across all forks.
+    struct OrderSession {
+        order: Arc<StdMutex<Vec<String>>>,
+        buf: StdMutex<Vec<String>>,
+    }
+
+    impl Session for OrderSession {
+        fn commit(&self) -> Result<(), SessionError> {
+            let mut buf = self.buf.lock().unwrap();
+            self.order.lock().unwrap().extend(buf.drain(..));
+            Ok(())
+        }
+        fn rollback(&self) -> Result<(), SessionError> {
+            self.buf.lock().unwrap().clear();
+            Ok(())
+        }
+        fn fork(self: Arc<Self>) -> Result<Arc<dyn Session>, SessionError> {
+            Ok(Arc::new(OrderSession {
+                order: self.order.clone(),
+                buf: StdMutex::new(vec![]),
+            }))
+        }
+        fn request_input(
+            &self,
+            _: Obj,
+            _: uuid::Uuid,
+            _: Option<Vec<(moor_var::Symbol, Var)>>,
+        ) -> Result<(), SessionError> {
+            Err(SessionError::DeliveryError)
+        }
+        fn send_event(&self, _: Obj, event: Box<NarrativeEvent>) -> Result<(), SessionError> {
+            if let Event::Notify { value, .. } = event.event() {
+                self.buf.lock().unwrap().push(to_literal(&value));
+            }
+            Ok(())
+        }
+        fn log_event(&self, _: Obj, _: Box<NarrativeEvent>) -> Result<(), SessionError> {
+            Ok(())
+        }
+        fn send_system_msg(&self, _: Obj, _: &str) -> Result<(), SessionError> {
+            Ok(())
+        }
+        fn notify_shutdown(&self, _: Option<String>) -> Result<(), SessionError> {
+            Ok(())
+        }
+        fn connection_name(&self, _: Obj) -> Result<String, SessionError> {
+            Ok(String::new())
+        }
+        fn disconnect(&self, _: Obj) -> Result<(), SessionError> {
+            Ok(())
+        }
+        fn connected_players(&self, _: bool) -> Result<Vec<Obj>, SessionError> {
+            Ok(vec![])
+        }
+        fn connected_seconds(&self, _: Obj) -> Result<f64, SessionError> {
+            Ok(0.0)
+        }
+        fn idle_seconds(&self, _: Obj) -> Result<f64, SessionError> {
+            Ok(0.0)
+        }
+        fn connections(&self, _: Option<Obj>) -> Result<Vec<Obj>, SessionError> {
+            Ok(vec![])
+        }
+        fn connection_details(
+            &self,
+            _: Option<Obj>,
+        ) -> Result<Vec<moor_common::tasks::ConnectionDetails>, SessionError> {
+            Ok(vec![])
+        }
+        fn connection_attributes(&self, _: Obj) -> Result<Var, SessionError> {
+            Ok(v_int(0))
+        }
+        fn set_connection_attribute(
+            &self,
+            _: Obj,
+            _: moor_var::Symbol,
+            _: Var,
+        ) -> Result<(), SessionError> {
+            Ok(())
+        }
+    }
+
+    /// One trial of the stock scheduler: 8 threads submit an eval each at once.
+    fn concurrent_trial() -> Vec<String> {
+        let scheduler = Scheduler::new(
+            semver::Version::new(0, 1, 0),
+            create_db(),
+            Box::new(NoopTasksDb {}),
+            Arc::new(Config::default()),
+            Arc::new(NoopSystemControl::default()),
+            None,
+            None,
+        );
+        assert!(!scheduler.is_manual());
+        let client = scheduler.client().unwrap();
+        let services = scheduler.start(Arc::new(Factory)).unwrap();
+        let order = Arc::new(StdMutex::new(Vec::new()));
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+        let threads: Vec<_> = (0..8)
+            .map(|k| {
+                let client = client.clone();
+                let order = order.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let session: Arc<dyn Session> = Arc::new(OrderSession {
+                        order,
+                        buf: StdMutex::new(vec![]),
+                    });
+                    barrier.wait();
+                    let code = format!(
+                        "fork (0) notify(player, \"fork {k}\"); endfork \
+                         for i in [1..200] endfor notify(player, \"cmd {k}\"); return 1;"
+                    );
+                    moor_kernel::testing::scheduler_test_utils::call_eval(
+                        client, session, &WIZARD, code,
+                    )
+                    .ok();
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        // Let forked children finish.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        client.submit_shutdown("done").ok();
+        services.join().ok();
+        order.lock().unwrap().clone()
+    }
+
+    /// `Scheduler::start` in deterministic mode (the daemon path): one sequencer thread serves
+    /// client requests and runs each to quiescence.
+    #[test]
+    fn sequencer_thread_serves_requests_serially() {
+        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        deterministic::disable();
+        let mode = DeterministicMode::on();
+        deterministic::configure(&mode);
+        let scheduler = Scheduler::new(
+            semver::Version::new(0, 1, 0),
+            create_db(),
+            Box::new(NoopTasksDb {}),
+            Arc::new(Config {
+                deterministic: mode,
+                ..Config::default()
+            }),
+            Arc::new(NoopSystemControl::default()),
+            None,
+            None,
+        );
+        let client = scheduler.client().unwrap();
+        let services = scheduler.start(Arc::new(Factory)).unwrap();
+        let order = Arc::new(StdMutex::new(Vec::new()));
+        let session: Arc<dyn Session> = Arc::new(OrderSession {
+            order: order.clone(),
+            buf: StdMutex::new(vec![]),
+        });
+        let result = moor_kernel::testing::scheduler_test_utils::call_eval(
+            client.clone(),
+            session,
+            &WIZARD,
+            FORK_TREE.to_string(),
+        );
+        assert_eq!(result.ok(), Some(v_int(1)));
+        let command = moor_kernel::testing::scheduler_test_utils::call_eval(
+            client.clone(),
+            Arc::new(NoopClientSession::new()),
+            &WIZARD,
+            "return block_context()['command];".to_string(),
+        );
+        client.submit_shutdown("done").ok();
+        services.join().ok();
+        deterministic::disable();
+        assert_eq!(
+            *order.lock().unwrap(),
+            [
+                "\"parent\"",
+                "\"child A\"",
+                "\"child B\"",
+                "\"grandchild of A\""
+            ]
+        );
+        assert_eq!(command.ok(), Some(v_int(2)));
+    }
+
+    #[test]
+    fn concurrent_submission_to_the_stock_scheduler_diverges() {
+        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        deterministic::disable();
+        let mut distinct = std::collections::BTreeSet::new();
+        for _ in 0..10 {
+            distinct.insert(concurrent_trial());
+            if distinct.len() > 1 {
+                break;
+            }
+        }
+        assert!(
+            distinct.len() > 1,
+            "10 concurrent trials committed in the same order: {distinct:?}"
+        );
+    }
+
+    /// Throughput of the serial executor against the stock threaded scheduler (one-at-a-time and
+    /// 8 concurrent submitters). Prints numbers; asserts nothing. Run with `--ignored --nocapture`.
+    #[test]
+    #[ignore = "measurement, not a check"]
+    fn perf_serial_vs_stock() {
+        const N: usize = 2000;
+        let code = "#0.n = #0.n + 1; notify(player, tostr(#0.n)); return #0.n;";
+        let setup = "add_property(#0, \"n\", 0, {player, \"rw\"}); return 1;";
+
+        let mut world = World::start();
+        world.eval(setup);
+        let started = std::time::Instant::now();
+        let session: Arc<dyn Session> = Arc::new(NoopClientSession::new());
+        world.driver().begin_block(block(2));
+        for _ in 0..N {
+            world.driver().submit(
+                BlockInput::Eval {
+                    player: WIZARD,
+                    code: code.to_string(),
+                },
+                session.clone(),
+            );
+        }
+        let out = world.driver().end_block();
+        let serial = N as f64 / started.elapsed().as_secs_f64();
+        assert_eq!(out.conflicts, 0);
+        drop(world);
+
+        let stock = |threads: usize| -> f64 {
+            let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            deterministic::disable();
+            let scheduler = Scheduler::new(
+                semver::Version::new(0, 1, 0),
+                create_db(),
+                Box::new(NoopTasksDb {}),
+                Arc::new(Config::default()),
+                Arc::new(NoopSystemControl::default()),
+                None,
+                None,
+            );
+            let client = scheduler.client().unwrap();
+            let services = scheduler.start(Arc::new(Factory)).unwrap();
+            moor_kernel::testing::scheduler_test_utils::call_eval(
+                client.clone(),
+                Arc::new(NoopClientSession::new()),
+                &WIZARD,
+                setup.to_string(),
+            )
+            .unwrap();
+            let started = std::time::Instant::now();
+            let handles: Vec<_> = (0..threads)
+                .map(|_| {
+                    let client = client.clone();
+                    std::thread::spawn(move || {
+                        for _ in 0..N / threads {
+                            moor_kernel::testing::scheduler_test_utils::call_eval(
+                                client.clone(),
+                                Arc::new(NoopClientSession::new()),
+                                &WIZARD,
+                                code.to_string(),
+                            )
+                            .ok();
+                        }
+                    })
+                })
+                .collect();
+            for h in handles {
+                h.join().unwrap();
+            }
+            let rate = N as f64 / started.elapsed().as_secs_f64();
+            client.submit_shutdown("done").ok();
+            services.join().ok();
+            rate
+        };
+        let stock_serial = stock(1);
+        let stock_concurrent = stock(8);
+        println!(
+            "PERF commands/s: serial executor {serial:.0}, stock one-at-a-time {stock_serial:.0}, \
+             stock 8 submitters {stock_concurrent:.0}"
+        );
+    }
+}
