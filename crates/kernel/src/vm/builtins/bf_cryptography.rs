@@ -24,7 +24,6 @@ use argon2::password_hash::{SaltString, rand_core::OsRng};
 use argon2::{Algorithm, Argon2, Params, PasswordHasher, PasswordVerifier, Version};
 use base32::Alphabet;
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
-use chrono::Utc;
 use hmac::{Hmac, KeyInit, Mac};
 use rand::RngExt;
 use rand::distr::Alphanumeric;
@@ -1285,7 +1284,8 @@ fn bf_totp(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
         }
         t as u64
     } else {
-        Utc::now().timestamp() as u64
+        // Block time in deterministic mode, wall clock otherwise.
+        deterministic::now_secs()
     };
 
     let time_step = if bf_args.args.len() > 2 {

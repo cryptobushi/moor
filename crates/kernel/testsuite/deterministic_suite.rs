@@ -352,3 +352,11 @@ fn property_definition_ids_derive_from_the_block() {
         .uuid();
     assert_eq!(id, deterministic::derive_id(IdDomain::Definition, 8, 0, 0));
 }
+
+#[test]
+fn totp_defaults_to_block_time() {
+    let det = Det::start(9, 1_700_007_000, 6);
+    let default = det.run("return totp(\"JBSWY3DPEHPK3PXP\");");
+    let explicit = det.run("return totp(\"JBSWY3DPEHPK3PXP\", 1700007000);");
+    assert_eq!(default, explicit);
+}
