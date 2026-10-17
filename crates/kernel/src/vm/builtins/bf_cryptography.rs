@@ -42,18 +42,30 @@ use crate::vm::builtins::{
 use moor_common::deterministic;
 use moor_compiler::{offset_for_builtin, to_literal};
 use moor_var::{
-    E_ARGS, E_INVARG, E_TYPE, Symbol, Var, Variant, v_binary, v_error, v_float, v_int, v_list,
-    v_map, v_obj, v_str, v_string, v_sym,
+    E_ARGS, E_INVARG, E_PERM, E_TYPE, Symbol, Var, Variant, v_binary, v_error, v_float, v_int,
+    v_list, v_map, v_obj, v_str, v_string, v_sym,
 };
 
 static SHA1_SYM: LazyLock<Symbol> = LazyLock::new(|| Symbol::mk("sha1"));
 static SHA256_SYM: LazyLock<Symbol> = LazyLock::new(|| Symbol::mk("sha256"));
 static SHA512_SYM: LazyLock<Symbol> = LazyLock::new(|| Symbol::mk("sha512"));
 
+/// Refuse builtins whose output depends on randomness the library draws from the OS (age keys and
+/// nonces, PASETO nonces). They cannot be replayed, so deterministic mode raises E_PERM (DA R4).
+fn reject_in_deterministic_mode(builtin: &str) -> Result<(), BfErr> {
+    if deterministic::is_enabled() {
+        return Err(BfErr::ErrValue(E_PERM.with_msg(|| {
+            format!("{builtin}() is not available in deterministic mode")
+        })));
+    }
+    Ok(())
+}
+
 /// Usage: `list age_generate_keypair([bool as_bytes])`
 /// Generates an X25519 keypair for age encryption. Returns `{public_key, private_key}`.
 /// If as_bytes is true, returns as bytes; otherwise Bech32-encoded strings. Programmer-only.
 fn bf_age_generate_keypair(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
+    reject_in_deterministic_mode("age_generate_keypair")?;
     if bf_args.args.len() > 1 {
         return Err(BfErr::ErrValue(
             E_ARGS.msg("age_generate_keypair() takes at most one argument"),
@@ -102,6 +114,7 @@ fn bf_age_generate_keypair(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr
 /// Encrypts message using age for one or more recipients (X25519 or SSH keys).
 /// Recipients can be strings or bytes. Returns encrypted data as bytes. Programmer-only.
 fn bf_age_encrypt(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
+    reject_in_deterministic_mode("age_encrypt")?;
     if bf_args.args.len() != 2 {
         return Err(BfErr::ErrValue(
             E_ARGS.msg("age_encrypt() requires exactly two arguments"),
@@ -361,6 +374,7 @@ fn bf_age_decrypt(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
 /// Encrypts message using passphrase-based age encryption (scrypt KDF). Programmer-only.
 /// Returns encrypted data as bytes.
 fn bf_age_passphrase_encrypt(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
+    reject_in_deterministic_mode("age_passphrase_encrypt")?;
     if bf_args.args.len() != 2 {
         return Err(BfErr::ErrValue(
             E_ARGS.msg("age_passphrase_encrypt() requires exactly two arguments"),
@@ -984,6 +998,7 @@ fn json_to_var(json: &JsonValue) -> Result<Var, BfErr> {
 /// or a base64-encoded string. Without key, uses server's symmetric key (wizard-only).
 /// With key, any programmer can call.
 fn bf_paseto_make_local(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
+    reject_in_deterministic_mode("paseto_make_local")?;
     if bf_args.args.is_empty() || bf_args.args.len() > 2 {
         return Err(BfErr::Code(E_ARGS));
     }

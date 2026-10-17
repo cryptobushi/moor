@@ -20,7 +20,7 @@ use moor_common::{
     tasks::NarrativeEvent,
 };
 use moor_db::Database;
-use moor_var::{Var, v_float, v_int};
+use moor_var::{E_PERM, Var, v_float, v_int};
 
 use crate::common::{create_db, run_as_verb};
 
@@ -51,6 +51,14 @@ impl Det {
     fn run(&self, body: &str) -> Var {
         deterministic::next_command();
         run_as_verb(self.db.as_ref(), body).expect("verb raised")
+    }
+
+    /// The error code `body` raises. The harness reports uncaught errors as the error value.
+    fn raised(&self, body: &str) -> moor_var::ErrorCode {
+        self.run(body)
+            .as_error()
+            .expect("verb did not raise")
+            .err_type()
     }
 }
 
@@ -226,4 +234,34 @@ fn salt_replays_for_the_same_command() {
 fn salt_differs_between_commands() {
     let det = Det::start(5, 1_700_003_000, 4);
     assert_ne!(det.run("return salt();"), det.run("return salt();"));
+}
+
+#[test]
+fn age_generate_keypair_is_refused() {
+    let det = Det::start(6, 1_700_004_000, 2);
+    assert_eq!(det.raised("return age_generate_keypair();"), E_PERM);
+}
+
+#[test]
+fn age_encrypt_is_refused() {
+    let det = Det::start(6, 1_700_004_000, 2);
+    assert_eq!(det.raised("return age_encrypt(\"hi\", {\"x\"});"), E_PERM);
+}
+
+#[test]
+fn age_passphrase_encrypt_is_refused() {
+    let det = Det::start(6, 1_700_004_000, 2);
+    assert_eq!(
+        det.raised("return age_passphrase_encrypt(\"hi\", \"pw\");"),
+        E_PERM
+    );
+}
+
+#[test]
+fn paseto_make_local_is_refused() {
+    let det = Det::start(6, 1_700_004_000, 2);
+    assert_eq!(
+        det.raised("return paseto_make_local({{\"a\", 1}});"),
+        E_PERM
+    );
 }
