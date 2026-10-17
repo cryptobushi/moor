@@ -593,12 +593,20 @@ fn bf_crypt(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
 
     let salt = if bf_args.args.len() == 1 {
         // Provide a random 2-letter salt.
-        let mut rng = rand::rng();
-        let mut salt = String::new();
-
-        salt.push(char::from(rng.sample(Alphanumeric)));
-        salt.push(char::from(rng.sample(Alphanumeric)));
-        salt
+        const ALPHANUMERIC: &[u8; 62] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+        let deterministic_salt = deterministic::with_rng(|rng| {
+            (0..2)
+                .map(|_| char::from(ALPHANUMERIC[rng.below(ALPHANUMERIC.len() as u64) as usize]))
+                .collect::<String>()
+        });
+        deterministic_salt.unwrap_or_else(|| {
+            let mut rng = rand::rng();
+            let mut salt = String::new();
+            salt.push(char::from(rng.sample(Alphanumeric)));
+            salt.push(char::from(rng.sample(Alphanumeric)));
+            salt
+        })
     } else {
         let Some(salt) = bf_args.args[1].as_string() else {
             return Err(BfErr::Code(E_TYPE));
@@ -621,10 +629,16 @@ fn bf_salt(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
         return Err(BfErr::Code(E_ARGS));
     }
 
-    let mut rng_core = OsRng;
-    let salt = SaltString::generate(&mut rng_core);
-    let salt = v_str(salt.as_str());
-    Ok(Ret(salt))
+    // 16 bytes, as SaltString::generate draws: from the command's stream in deterministic mode.
+    let salt = match deterministic::with_rng(|rng| {
+        let mut bytes = [0u8; 16];
+        rng.fill_bytes(&mut bytes);
+        bytes
+    }) {
+        Some(bytes) => SaltString::encode_b64(&bytes).map_err(|_| BfErr::Code(E_INVARG))?,
+        None => SaltString::generate(&mut OsRng),
+    };
+    Ok(Ret(v_str(salt.as_str())))
 }
 
 /// Usage: `str|bytes string_hmac(str text, str key [, symbol algorithm] [, bool binary_output])`

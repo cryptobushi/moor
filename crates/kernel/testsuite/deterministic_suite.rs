@@ -194,3 +194,36 @@ fn random_bytes_come_from_the_command_stream() {
     deterministic::RngStream::new(&[4; 32], 1).fill_bytes(&mut expected);
     assert_eq!(det.run("return random_bytes(20);"), Var::from(expected));
 }
+
+#[test]
+fn crypt_default_salt_replays_for_the_same_command() {
+    let det = Det::start(5, 1_700_003_000, 4);
+    let hashed = det.run("return crypt(\"secret\");");
+    let again = {
+        deterministic::set_block(BlockContext {
+            height: 5,
+            timestamp: 1_700_003_000,
+            seed: [4; 32],
+        });
+        det.run("return crypt(\"secret\");")
+    };
+    assert_eq!(hashed, again);
+}
+
+#[test]
+fn salt_replays_for_the_same_command() {
+    let det = Det::start(5, 1_700_003_000, 4);
+    let first = det.run("return salt();");
+    deterministic::set_block(BlockContext {
+        height: 5,
+        timestamp: 1_700_003_000,
+        seed: [4; 32],
+    });
+    assert_eq!(det.run("return salt();"), first);
+}
+
+#[test]
+fn salt_differs_between_commands() {
+    let det = Det::start(5, 1_700_003_000, 4);
+    assert_ne!(det.run("return salt();"), det.run("return salt();"));
+}
