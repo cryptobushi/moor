@@ -515,10 +515,16 @@ impl PartialOrd for Symbol {
 
 impl Ord for Symbol {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // Only compare by compare_id for case-insensitive ordering
-        // repr_id should not affect ordering since symbols with same compare_id
-        // are considered equal for comparison purposes
-        self.compare_id.cmp(&other.compare_id)
+        // Same compare_id means the same case-insensitive group: equal, whatever the repr_id.
+        if self.compare_id == other.compare_id {
+            return std::cmp::Ordering::Equal;
+        }
+        // Order by the case-folded string, never by compare_id. compare_id is handed out in
+        // first-intern order, which depends on boot order, DB load order and thread timing, so
+        // ordering by it made the iteration order of symbol-keyed maps differ between processes
+        // holding identical state (audit H2). UniCase's Ord folds exactly as the interner's group
+        // key does, so this is Equal if and only if the compare_ids are equal.
+        UniCase::new(self.as_str()).cmp(&UniCase::new(other.as_str()))
     }
 }
 
