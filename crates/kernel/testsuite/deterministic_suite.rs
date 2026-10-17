@@ -426,6 +426,7 @@ fn block_context_command_advances() {
     det.run("return 0;");
     assert_eq!(det.run("return block_context()['command];"), v_int(2));
 }
+
 // --- Manual executor and block driver (S0-4) ---------------------------------------------------
 
 mod executor {
@@ -1139,4 +1140,33 @@ mod executor {
              stock 8 submitters {stock_concurrent:.0}"
         );
     }
+}
+
+#[test]
+fn contents_children_and_players_are_in_object_id_order() {
+    let det = Det::start(13, 1_700_011_000, 1);
+    // Create in one order, move/parent/flag in a scrambled one, and check against sort().
+    let ok = det.run(
+        "xs = {}; for i in [1..12] xs = {@xs, create(#-1)}; endfor \
+         order = {7, 2, 11, 4, 9, 1, 12, 5, 3, 10, 6, 8}; \
+         for i in (order) move(xs[i], #1); chparent(xs[i], #1); endfor \
+         return {#1.contents == sort(#1.contents), children(#1) == sort(children(#1))};",
+    );
+    assert_eq!(ok, v_list(&[v_int(1), v_int(1)]));
+}
+
+#[test]
+fn ordinal_matching_follows_object_id_order() {
+    let det = Det::start(14, 1_700_012_000, 1);
+    // Swords are created in id order but moved into the room in reverse, so a hash- or
+    // recency-ordered contents list would give a different "second sword".
+    let picked = det.run(
+        "xs = {}; for i in [1..6] x = create(#-1); x.name = \"sword\"; xs = {@xs, x}; endfor \
+         for i in [1..6] move(xs[7 - i], #1); endfor \
+         keys = {}; for o in (#1.contents) keys = {@keys, {o.name}}; endfor \
+         return {complex_match(\"first sword\", #1.contents, keys) == xs[1], \
+                 complex_match(\"second sword\", #1.contents, keys) == xs[2], \
+                 complex_match(\"sixth sword\", #1.contents, keys) == xs[6]};",
+    );
+    assert_eq!(picked, v_list(&[v_int(1), v_int(1), v_int(1)]));
 }
