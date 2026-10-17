@@ -2213,6 +2213,11 @@ mod state_root {
 
         /// `before_load` runs after the mode is configured and before the core is loaded.
         fn start_with(before_load: impl FnOnce()) -> Self {
+            Self::start_features(before_load, moor_vm::FeaturesConfig::default())
+        }
+
+        /// As `start_with`, with the given language features (`use_uuobjids`, `anonymous_objects`).
+        fn start_features(before_load: impl FnOnce(), features: moor_vm::FeaturesConfig) -> Self {
             let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
             deterministic::disable();
             let mode = DeterministicMode::on();
@@ -2226,6 +2231,7 @@ mod state_root {
                 Box::new(NoopTasksDb {}),
                 Arc::new(Config {
                     deterministic: mode,
+                    features: Arc::new(features),
                     ..Config::default()
                 }),
                 Arc::new(NoopSystemControl::default()),
@@ -2753,6 +2759,165 @@ mod state_root {
                 created += 250;
             }
             measure(&mut world, &format!("+{created} objects"));
+        }
+    }
+
+    // S0-12: object id allocation.
+
+    fn id_features() -> moor_vm::FeaturesConfig {
+        moor_vm::FeaturesConfig {
+            use_uuobjids: true,
+            anonymous_objects: true,
+            ..Default::default()
+        }
+    }
+
+    /// Creates numbered, "UUID" (type 2) and anonymous objects, recycles some, creates more, and
+    /// returns what the program saw.
+    const ID_SCENARIO: &[&[&str]] = &[
+        &[
+            "a = create(#1); b = create(#1, player, 2); c = create(#1, player, 1); \
+             return {a, b, c, typeof(b), typeof(c)};",
+            "r = {}; for i in [1..40] o = create(#1, player, i % 3); r = {@r, o}; endfor return r;",
+        ],
+        &[
+            "x = create(#1); y = create(#1, player, 2); recycle(x); recycle(y); \
+             z = create(#1); w = create(#1, player, 2); return {x, y, z, w};",
+        ],
+        &[
+            "r = {}; for i in [1..60] o = create(#1, player, 0); recycle(o); endfor \
+             return create(#1);",
+        ],
+    ];
+
+    #[test]
+    fn create_allocates_sequential_numbered_ids_for_type_zero_and_two() {
+        let mut world = World::start_features(|| {}, id_features());
+        let max = world.eval("return max_object();");
+        let max = max.as_object().unwrap().id().0;
+        let v = world.eval("return {create(#1), create(#1, player, 2), create(#1, player, 0)};");
+        let ids: Vec<i32> = v
+            .as_list()
+            .unwrap()
+            .iter_ref()
+            .map(|o| o.as_object().unwrap().id().0)
+            .collect();
+        assert_eq!(ids, vec![max + 1, max + 2, max + 3]);
+        let kinds = world.eval("o = create(#1, player, 2); return {is_uuobjid(o)};");
+        assert_eq!(toliteral_of(&kinds), "{0}");
+    }
+
+    #[test]
+    fn recycled_ids_are_never_reused_by_create() {
+        let mut world = World::start_features(|| {}, id_features());
+        let v = world.eval(
+            "a = create(#1); recycle(a); b = create(#1); recycle(b); c = create(#1); \
+             return {a, b, c};",
+        );
+        let ids: Vec<i32> = v
+            .as_list()
+            .unwrap()
+            .iter_ref()
+            .map(|o| o.as_object().unwrap().id().0)
+            .collect();
+        assert!(ids[0] < ids[1] && ids[1] < ids[2], "{ids:?}");
+    }
+
+    #[test]
+    fn anonymous_ids_come_from_the_persisted_counter() {
+        let mut world = World::start_features(|| {}, id_features());
+        let v = world.eval(
+            "a = create(#1, player, 1); b = create(#1, player, 1); \
+             return {is_anonymous(a), is_anonymous(b), a != b};",
+        );
+        assert_eq!(toliteral_of(&v), "{1, 1, 1}");
+        let r1 = world
+            .driver()
+            .canonical_relation("sequences")
+            .unwrap()
+            .encode();
+        world.eval("a = create(#1, player, 1); return 1;");
+        let r2 = world
+            .driver()
+            .canonical_relation("sequences")
+            .unwrap()
+            .encode();
+        assert_ne!(r1, r2, "the anonymous counter is in the sequences relation");
+    }
+
+    fn toliteral_of(v: &Var) -> String {
+        moor_compiler::to_literal(v)
+    }
+
+    #[test]
+    fn numbered_and_anonymous_counters_are_in_the_sequences_relation_only() {
+        let mut world = World::start_features(|| {}, id_features());
+        let before = root(&world.block(&["return 1;"]));
+        let after = root(&world.block(&["a = create(#1); b = create(#1, player, 1); return 1;"]));
+        let c = changed(&before, &after);
+        assert!(c.contains(&"sequences"), "{c:?}");
+    }
+
+    /// Child half: runs `ID_SCENARIO`, prints every returned id literal and the root per block.
+    #[test]
+    #[ignore = "run as a subprocess by object_ids_are_identical_across_20_processes"]
+    fn object_ids_child() {
+        let rotate: usize = std::env::var("RW_STATE_ROOT_INTERN")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        let mut world = World::start_features(
+            || {
+                let n = INTERN_POOL.len();
+                for i in 0..n {
+                    let _ = Symbol::mk(INTERN_POOL[(i + rotate) % n]);
+                }
+            },
+            id_features(),
+        );
+        let mut lines = Vec::new();
+        for block in ID_SCENARIO {
+            let out = world.block(block);
+            for o in &out.outcomes {
+                if let Some(Ok(v)) = &o.result {
+                    lines.push(format!("{} {}", out.block.height, toliteral_of(v)));
+                }
+            }
+            lines.push(format!("{} {}", out.block.height, root(&out).root_hex()));
+        }
+        println!("IDS-BEGIN\n{}\nIDS-END", lines.join("\n"));
+    }
+
+    fn child_ids(rotate: usize) -> String {
+        let exe = std::env::current_exe().expect("test binary");
+        let output = std::process::Command::new(exe)
+            .args([
+                "state_root::object_ids_child",
+                "--exact",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("RW_STATE_ROOT_INTERN", rotate.to_string())
+            .output()
+            .expect("run child");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let begin = stdout.find("IDS-BEGIN\n").expect("marker") + "IDS-BEGIN\n".len();
+        let end = stdout.find("\nIDS-END").expect("end marker");
+        stdout[begin..end].to_string()
+    }
+
+    #[test]
+    fn object_ids_are_identical_across_20_processes() {
+        let runs: Vec<String> = (0..20).map(child_ids).collect();
+        assert!(runs[0].lines().count() >= 6, "{}", runs[0]);
+        for (i, run) in runs.iter().enumerate() {
+            assert_eq!(run, &runs[0], "process {i} differs");
         }
     }
 }

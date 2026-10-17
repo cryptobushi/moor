@@ -820,6 +820,11 @@ macro_rules! define_relations {
             /// This constant identifies the sequence used to track the highest object ID
             /// that has been allocated, used for generating new unique object IDs.
             pub const SEQUENCE_MAX_OBJECT: usize = 0;
+
+            /// Counter for anonymous object ids in deterministic mode (see
+            /// `WorldStateTransaction::create_object`). Persisted with the other sequences, so it is
+            /// part of the `sequences` relation and the state root.
+            pub const SEQUENCE_ANON_OBJECT: usize = 1;
         }
     };
 

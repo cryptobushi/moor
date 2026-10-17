@@ -26,7 +26,9 @@ use edit::EditScope;
 use crate::{
     EntityMetadataKey, Error, ObjAndUUIDHolder, StringHolder,
     api::world_state::db_counters,
-    engine::moor_db::{Caches, SEQUENCE_MAX_OBJECT, WorldStateEdit, WorldStateTransaction},
+    engine::moor_db::{
+        Caches, SEQUENCE_ANON_OBJECT, SEQUENCE_MAX_OBJECT, WorldStateEdit, WorldStateTransaction,
+    },
     provider::fjall_provider::{EncodeFjallValue, FjallCodec, FjallProvider},
     tx::{EncodeFor, RelationTransaction},
 };
@@ -41,7 +43,7 @@ use moor_common::{
     util::BitEnum,
 };
 use moor_var::{
-    ByteSized, NOTHING, Obj, Symbol, Var,
+    AnonymousObjid, ByteSized, NOTHING, Obj, Symbol, Var,
     program::{ProgramType, opcode::BuiltinId},
     v_empty_map, v_map, v_none,
 };
@@ -49,6 +51,9 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::{collections::VecDeque, hash::Hash};
 use uuid::Uuid;
+
+/// Anonymous object ids carry a 62-bit payload.
+const ANON_PAYLOAD_MASK: u64 = (1 << 62) - 1;
 
 type RTx<Domain, Codomain> = RelationTransaction<Domain, Codomain, FjallProvider<Domain, Codomain>>;
 
@@ -385,25 +390,37 @@ impl WorldStateTransaction {
         Ok(())
     }
 
+    /// Next sequential numbered id from the persisted `SEQUENCE_MAX_OBJECT` counter.
+    fn next_numbered_object(&self) -> Result<Obj, WorldStateError> {
+        let max = self.increment_sequence(SEQUENCE_MAX_OBJECT);
+        if max < i32::MIN as i64 || max > i32::MAX as i64 {
+            return Err(WorldStateError::DatabaseError(format!(
+                "Maximum object sequence number out of bounds: {max}"
+            )));
+        }
+        Ok(Obj::mk_id(max as i32))
+    }
+
     pub fn create_object(
         &mut self,
         id_kind: ObjectKind,
         attrs: ObjAttrs,
     ) -> Result<Obj, WorldStateError> {
+        // In deterministic mode UUID-kind ids are time- and RNG-derived (DA R6), so they are never
+        // minted: a request for one is served by the persisted sequential counter instead (R5/R8,
+        // spec 8.3). Anonymous objects keep their type but take their id from a persisted counter
+        // (DA R7). Ids are never reused by `create`.
+        let deterministic = moor_common::deterministic::is_enabled();
         let id = match id_kind {
             ObjectKind::Objid(id) => id,
-            ObjectKind::NextObjid => {
-                let max = self.increment_sequence(SEQUENCE_MAX_OBJECT);
-                let max = if max < i32::MIN as i64 || max > i32::MAX as i64 {
-                    return Err(WorldStateError::DatabaseError(format!(
-                        "Maximum object sequence number out of bounds: {max}"
-                    )));
-                } else {
-                    max as i32
-                };
-                Obj::mk_id(max)
-            }
+            ObjectKind::NextObjid => self.next_numbered_object()?,
+            ObjectKind::UuObjId if deterministic => self.next_numbered_object()?,
             ObjectKind::UuObjId => Obj::mk_uuobjid_generated(),
+            ObjectKind::Anonymous if deterministic => {
+                let n = self.increment_sequence(SEQUENCE_ANON_OBJECT);
+                // Counter starts at 0; ids start at 1. 62-bit payload.
+                Obj::mk_anonymous(AnonymousObjid((n as u64 + 1) & ANON_PAYLOAD_MASK))
+            }
             ObjectKind::Anonymous => Obj::mk_anonymous_generated(),
         };
 
@@ -2159,6 +2176,10 @@ impl WorldStateTransaction {
                         candidate_id += 1;
                     }
                     Obj::mk_id(candidate_id)
+                }
+                ObjectKind::UuObjId if moor_common::deterministic::is_enabled() => {
+                    // No time/RNG-derived ids in deterministic mode: use the sequential counter.
+                    self.next_numbered_object()?
                 }
                 ObjectKind::UuObjId => Obj::mk_uuobjid_generated(),
                 ObjectKind::Anonymous => {
