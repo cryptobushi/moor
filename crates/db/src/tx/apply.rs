@@ -217,7 +217,7 @@ mod tests {
         sync::{Arc, Mutex},
     };
 
-    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
     struct TestDomain(u64);
 
     impl std::fmt::Display for TestDomain {

@@ -20,8 +20,10 @@ use std::{any::Any, collections::HashMap, hash::BuildHasherDefault};
 /// Type alias for imbl HashMap with AHasher
 type ImblHashMap<K, V> = imbl::GenericHashMap<K, V, BuildHasherDefault<AHasher>, DefaultSharedPtr>;
 
-/// Type alias for imbl HashSet with AHasher
-type ImblHashSet<T> = imbl::GenericHashSet<T, BuildHasherDefault<AHasher>, DefaultSharedPtr>;
+/// Type alias for the secondary index's per-codomain set. It is an ordered set (not a hash set) so
+/// that iteration order is the `Ord` order of the domain by construction, not a function of a
+/// per-process hash seed (audit H1). For `contents` and `children` this is object-id ascending.
+type ImblOrdSet<T> = imbl::GenericOrdSet<T, DefaultSharedPtr>;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Entry<T: Clone + PartialEq> {
@@ -104,7 +106,7 @@ where
 
     /// Optional secondary index: Codomain -> Set<Domain>
     /// Only present if secondary indexing is enabled
-    secondary_index: Option<ImblHashMap<Codomain, ImblHashSet<Domain>>>,
+    secondary_index: Option<ImblHashMap<Codomain, ImblOrdSet<Domain>>>,
 
     /// Whether the provider has been fully loaded
     provider_fully_loaded: bool,
@@ -125,10 +127,11 @@ where
     }
 }
 
-// Secondary index constructor - requires Codomain to also support Hash+Eq
+// Secondary index constructor - requires Codomain to also support Hash+Eq, and the domain to be
+// ordered so that reverse lookups come back in domain order.
 impl<Domain, Codomain> HashRelationIndex<Domain, Codomain>
 where
-    Domain: RelationDomain,
+    Domain: RelationDomain + Ord,
     Codomain: RelationCodomainHashable,
 {
     pub fn new_with_secondary() -> Self {
@@ -225,7 +228,7 @@ where
 /// Wrapper that adds proper secondary index support to HashRelationIndex
 pub struct SecondaryIndexRelation<Domain, Codomain>
 where
-    Domain: RelationDomain,
+    Domain: RelationDomain + Ord,
     Codomain: RelationCodomainHashable,
 {
     inner: HashRelationIndex<Domain, Codomain>,
@@ -233,7 +236,7 @@ where
 
 impl<Domain, Codomain> SecondaryIndexRelation<Domain, Codomain>
 where
-    Domain: RelationDomain,
+    Domain: RelationDomain + Ord,
     Codomain: RelationCodomainHashable,
 {
     pub fn new() -> Self {
@@ -267,7 +270,7 @@ where
 
 impl<Domain, Codomain> RelationIndex<Domain, Codomain> for SecondaryIndexRelation<Domain, Codomain>
 where
-    Domain: RelationDomain,
+    Domain: RelationDomain + Ord,
     Codomain: RelationCodomainHashable,
 {
     fn insert_entry(
@@ -431,7 +434,7 @@ mod tests {
     use super::*;
     use crate::engine::relation_key_unchanged;
 
-    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
     struct TestDomain(u64);
     impl std::fmt::Display for TestDomain {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

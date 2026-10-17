@@ -771,35 +771,59 @@ where
         Ok(valid_domains)
     }
 
-    pub fn get_by_codomain(&self, codomain: &Codomain) -> Vec<Domain> {
+    pub fn get_by_codomain(&self, codomain: &Codomain) -> Vec<Domain>
+    where
+        Domain: Ord,
+    {
         let mut results = Vec::new();
         self.for_each_by_codomain(codomain, |domain| results.push(domain.clone()));
         results
     }
 
-    /// Visit each domain that maps to the given codomain in this transaction's view.
-    /// Applies local operation overlays over the base index without materializing
-    /// the base reverse-lookup vector.
+    /// Visit each domain that maps to the given codomain in this transaction's view, in ascending
+    /// domain (`Ord`) order. The base index yields domains in order by construction; local
+    /// operations are sorted and merged in, so the order never depends on hashing (audit H1).
     pub fn for_each_by_codomain<F>(&self, codomain: &Codomain, mut f: F)
     where
+        Domain: Ord,
         F: FnMut(&Domain),
     {
-        self.index
-            .master_entries
-            .for_each_by_codomain(codomain, &mut |domain| {
-                // Any local op shadows base state for this domain.
-                if !self.index.local_operations.contains_key(domain) {
-                    f(domain);
-                }
-            });
-
         if self.index.local_operations.is_empty() {
+            self.index
+                .master_entries
+                .for_each_by_codomain(codomain, &mut |domain| f(domain));
             return;
         }
 
+        // Base domains arrive ascending. Any local op shadows base state for its domain.
+        let mut base: Vec<Domain> = Vec::new();
+        self.index
+            .master_entries
+            .for_each_by_codomain(codomain, &mut |domain| {
+                if !self.index.local_operations.contains_key(domain) {
+                    base.push(domain.clone());
+                }
+            });
+
+        let mut local: Vec<Domain> = Vec::new();
         self.index
             .local_operations
-            .for_each_by_codomain(codomain, f);
+            .for_each_by_codomain(codomain, |domain| local.push(domain.clone()));
+        local.sort_unstable();
+
+        // Merge two ascending, disjoint runs.
+        let (mut i, mut j) = (0, 0);
+        while i < base.len() && j < local.len() {
+            if base[i] <= local[j] {
+                f(&base[i]);
+                i += 1;
+            } else {
+                f(&local[j]);
+                j += 1;
+            }
+        }
+        base[i..].iter().for_each(&mut f);
+        local[j..].iter().for_each(&mut f);
     }
 
     pub fn get(&self, domain: &Domain) -> Result<Option<Codomain>, Error> {

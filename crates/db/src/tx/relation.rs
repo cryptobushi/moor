@@ -43,7 +43,7 @@ where
 
 fn secondary_index_factory<Domain, Codomain>() -> Box<dyn RelationIndex<Domain, Codomain>>
 where
-    Domain: RelationDomain,
+    Domain: RelationDomain + Ord,
     Codomain: RelationCodomainHashable,
 {
     Box::new(SecondaryIndexRelation::new())
@@ -83,6 +83,7 @@ where
 
     pub fn new_with_secondary(relation_name: Symbol, source: Arc<Source>) -> Self
     where
+        Domain: Ord,
         Codomain: RelationCodomainHashable,
     {
         Self {
@@ -293,7 +294,7 @@ mod tests {
         sync::{Arc, Mutex},
     };
 
-    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
     struct TestDomain(u64);
 
     impl std::fmt::Display for TestDomain {
