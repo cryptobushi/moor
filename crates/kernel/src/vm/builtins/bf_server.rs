@@ -475,12 +475,7 @@ fn bf_time(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
     if !bf_args.args.is_empty() {
         return Err(ErrValue(E_ARGS.msg("time() does not take any arguments")));
     }
-    Ok(Ret(v_int(
-        SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64,
-    )))
+    Ok(Ret(v_int(moor_common::util::det::now_secs() as i64)))
 }
 
 /// Usage: `float ftime([int mode])`
