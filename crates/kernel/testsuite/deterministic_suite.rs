@@ -15,9 +15,12 @@
 
 use std::sync::{Mutex, MutexGuard};
 
-use moor_common::deterministic::{self, BlockContext, DeterministicMode};
+use moor_common::{
+    deterministic::{self, BlockContext, DeterministicMode},
+    tasks::NarrativeEvent,
+};
 use moor_db::Database;
-use moor_var::{Var, v_float};
+use moor_var::{Var, v_float, v_int};
 
 use crate::common::{create_db, run_as_verb};
 
@@ -100,4 +103,44 @@ fn move_stamps_last_move_with_block_time() {
         det.run("x = create(#-1); move(x, #1); return x.last_move[\"time\"];"),
         Var::from(1_700_000_600i64)
     );
+}
+
+fn notify_event() -> NarrativeEvent {
+    NarrativeEvent::notify(v_int(0), v_int(1), None, false, false, None)
+}
+
+#[test]
+fn event_ids_and_timestamps_replay_for_the_same_block() {
+    let _det = Det::start(3, 1_700_001_000, 1);
+    deterministic::next_command();
+    let first = notify_event();
+    deterministic::set_block(BlockContext {
+        height: 3,
+        timestamp: 1_700_001_000,
+        seed: [1; 32],
+    });
+    deterministic::next_command();
+    let second = notify_event();
+    assert_eq!(
+        (first.event_id(), first.timestamp()),
+        (second.event_id(), second.timestamp())
+    );
+}
+
+#[test]
+fn event_ids_within_a_command_are_distinct() {
+    let _det = Det::start(3, 1_700_001_000, 1);
+    deterministic::next_command();
+    assert_ne!(notify_event().event_id(), notify_event().event_id());
+}
+
+#[test]
+fn event_timestamp_is_block_time() {
+    let _det = Det::start(3, 1_700_001_000, 1);
+    let secs = notify_event()
+        .timestamp()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    assert_eq!(secs, 1_700_001_000);
 }

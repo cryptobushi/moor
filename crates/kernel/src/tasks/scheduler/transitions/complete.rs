@@ -17,7 +17,10 @@
 
 use super::super::lifecycle::TaskLifecycle;
 use crate::tasks::registry::{RunningTask, RunningTaskPhase, TaskDispatch};
-use moor_common::tasks::{SchedulerError, Session, TaskId};
+use moor_common::{
+    deterministic,
+    tasks::{SchedulerError, Session, TaskId},
+};
 use moor_var::Var;
 use std::sync::Arc;
 
@@ -34,9 +37,8 @@ use moor_common::tasks::{
 };
 use moor_compiler::to_literal;
 use moor_var::{List, SYSTEM_OBJECT, Symbol, v_empty_str, v_obj, v_str};
-use std::{sync::LazyLock, time::SystemTime};
+use std::sync::LazyLock;
 use tracing::{debug, error, warn};
-use uuid::Uuid;
 
 #[must_use]
 pub(in crate::tasks::scheduler) struct TaskCompletion {
@@ -444,8 +446,8 @@ impl Scheduler {
             if let Err(send_error) = completion.session.send_event(
                 task.player,
                 Box::new(NarrativeEvent {
-                    event_id: Uuid::now_v7(),
-                    timestamp: SystemTime::now(),
+                    event_id: deterministic::event_id(),
+                    timestamp: deterministic::now_system(),
                     author: v_obj(task.player),
                     event: Event::Traceback(exception.as_ref().clone()),
                 }),

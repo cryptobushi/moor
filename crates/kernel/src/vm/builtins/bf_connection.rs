@@ -20,6 +20,7 @@ use crate::vm::builtins::BfRet::{Ret, RetNil, VmInstr};
 use crate::vm::builtins::{BfCallState, BfErr, BfRet, BuiltinFunction, world_state_bf_err};
 use crate::vm::vm_host::ExecutionResult;
 use moor_common::builtins::offset_for_builtin;
+use moor_common::deterministic;
 use moor_common::tasks::Event::{Present, Unpresent};
 use moor_common::tasks::{NarrativeEvent, Presentation, SessionError};
 use moor_var::VarType::TYPE_STR;
@@ -27,7 +28,7 @@ use moor_var::{
     E_ARGS, E_INVARG, E_PERM, E_TYPE, Symbol, Var, Variant, v_arc_str, v_float, v_int, v_list,
     v_list_iter, v_map, v_obj, v_str, v_string, v_sym,
 };
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 use tracing::{info, warn};
 
 /// Usage: `int force_input(obj conn, str line [, int at_front])`
@@ -921,8 +922,8 @@ fn bf_present(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
     if bf_args.args.len() == 2 {
         let event = Unpresent(id.as_str().to_string());
         let event = NarrativeEvent {
-            event_id: uuid::Uuid::now_v7(),
-            timestamp: SystemTime::now(),
+            event_id: deterministic::event_id(),
+            timestamp: deterministic::now_system(),
             author: bf_args.exec_state.this(),
             event,
         };
@@ -1036,8 +1037,8 @@ fn bf_present(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
     };
 
     let event = NarrativeEvent {
-        event_id: uuid::Uuid::now_v7(),
-        timestamp: SystemTime::now(),
+        event_id: deterministic::event_id(),
+        timestamp: deterministic::now_system(),
         author: bf_args.exec_state.this(),
         event: Present(event),
     };
