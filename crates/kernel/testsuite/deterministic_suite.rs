@@ -360,3 +360,9 @@ fn totp_defaults_to_block_time() {
     let explicit = det.run("return totp(\"JBSWY3DPEHPK3PXP\", 1700007000);");
     assert_eq!(default, explicit);
 }
+
+#[test]
+fn seconds_left_reports_no_wall_clock_limit() {
+    let det = Det::start(10, 1_700_008_000, 7);
+    assert_eq!(det.run("return seconds_left();"), v_int(-1));
+}

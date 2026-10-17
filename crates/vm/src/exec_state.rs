@@ -305,8 +305,14 @@ impl ExecState {
         self.start_instant = Some(Instant::now());
     }
 
+    /// Wall-clock time since the task started, or `None` when it is not tracked. Deterministic mode
+    /// never tracks it: only tick limits apply, because how far a task gets before a wall-clock
+    /// limit depends on CPU speed and load (DA T5). This also makes `time_left()` `None`.
     #[inline]
     pub fn elapsed_runtime(&self) -> Option<Duration> {
+        if moor_common::deterministic::is_enabled() {
+            return None;
+        }
         if let Some(start) = self.start_instant {
             return Some(start.elapsed());
         }
