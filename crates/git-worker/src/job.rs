@@ -209,7 +209,13 @@ pub fn child_main(directory: &Path) -> eyre::Result<()> {
     std::io::stdout().write_all(&encode_var_cbor(&result)?)?;
     Ok(())
 }
-fn set_limit(resource: libc::__rlimit_resource_t, value: u64) -> std::io::Result<()> {
+/// The `setrlimit` resource argument type: glibc uses a dedicated enum type, other platforms use `c_int`.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+type RlimitResource = libc::__rlimit_resource_t;
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+type RlimitResource = libc::c_int;
+
+fn set_limit(resource: RlimitResource, value: u64) -> std::io::Result<()> {
     let limit = libc::rlimit {
         rlim_cur: value as libc::rlim_t,
         rlim_max: value as libc::rlim_t,
