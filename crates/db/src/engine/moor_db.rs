@@ -140,7 +140,7 @@ impl Caches {
     }
 }
 
-const SEQUENCE_COUNT: usize = 15;
+pub(crate) const SEQUENCE_COUNT: usize = 15;
 
 pub(crate) struct SequenceState {
     values: [CachePadded<AtomicI64>; SEQUENCE_COUNT],
@@ -261,6 +261,25 @@ impl MoorDB {
             object_propflags_keyspace: self.relations.object_propflags.source().partition().clone(),
             entity_metadata_keyspace: self.relations.entity_metadata.source().partition().clone(),
         }))
+    }
+
+    /// The state root of the current published snapshot (state encoding v1). Reads the in-memory
+    /// snapshot, so it never waits for Fjall. The sequences are read beside it: callers take the
+    /// root at a quiescent point (a block boundary), when no transaction is open.
+    pub fn state_root(
+        &self,
+    ) -> Result<crate::state_root::StateRoot, crate::state_root::StateRootError> {
+        let snapshot = self.snapshot_planes.load_root();
+        crate::state_root::state_root(&snapshot, &self.sequences)
+    }
+
+    /// The canonical encoding of one relation of the current published snapshot.
+    pub fn canonical_relation(
+        &self,
+        name: &str,
+    ) -> Result<crate::state_root::CanonicalRelation, crate::state_root::StateRootError> {
+        let snapshot = self.snapshot_planes.load_root();
+        crate::state_root::canonical_relation(&snapshot, &self.sequences, name)
     }
 
     /// Wait for the current published world state to be committed into Fjall.

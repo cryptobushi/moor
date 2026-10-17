@@ -4483,6 +4483,7 @@ dependencies = [
  "rand 0.10.3",
  "semver",
  "serde",
+ "sha2 0.11.0",
  "shuttle",
  "smallvec",
  "tempfile",

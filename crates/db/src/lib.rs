@@ -28,6 +28,7 @@ mod config;
 mod engine;
 mod model;
 mod provider;
+pub mod state_root;
 mod tx;
 
 use crate::engine::MoorDB;
@@ -197,6 +198,25 @@ pub trait Database: Send + Sync + WorldStateSource {
     fn storage_maintenance_stats(&self) -> Option<StorageMaintenanceStats> {
         None
     }
+
+    /// The state root of the latest committed state, with its per-relation hashes
+    /// (`state_root` module). Take it at a quiescent point, such as a block boundary.
+    fn state_root(&self) -> Result<state_root::StateRoot, WorldStateError> {
+        Err(WorldStateError::DatabaseError(
+            "Storage engine does not support state roots".to_string(),
+        ))
+    }
+
+    /// The canonical encoding of one relation of the latest committed state, by name
+    /// (`state_root::RELATIONS`).
+    fn canonical_relation(
+        &self,
+        _name: &str,
+    ) -> Result<state_root::CanonicalRelation, WorldStateError> {
+        Err(WorldStateError::DatabaseError(
+            "Storage engine does not support canonical dumps".to_string(),
+        ))
+    }
 }
 
 #[derive(Clone)]
@@ -294,5 +314,20 @@ impl Database for TxDB {
 
     fn storage_maintenance_stats(&self) -> Option<StorageMaintenanceStats> {
         Some(self.storage.storage_maintenance_stats())
+    }
+
+    fn state_root(&self) -> Result<state_root::StateRoot, WorldStateError> {
+        self.storage
+            .state_root()
+            .map_err(|e| WorldStateError::DatabaseError(e.to_string()))
+    }
+
+    fn canonical_relation(
+        &self,
+        name: &str,
+    ) -> Result<state_root::CanonicalRelation, WorldStateError> {
+        self.storage
+            .canonical_relation(name)
+            .map_err(|e| WorldStateError::DatabaseError(e.to_string()))
     }
 }
