@@ -170,6 +170,14 @@ fn main() {
     let (core, log) = (&args[1], &args[2]);
     let settle = Duration::from_millis(args.get(3).and_then(|s| s.parse().ok()).unwrap_or(150));
 
+    // REPLAY_DET=1 enables the spike's deterministic provider (fixed block clock + seeded RNG,
+    // sorted contents). Unset = stock mooR behaviour.
+    const BASE_SECS: u64 = 1_700_000_000;
+    const SEED: u64 = 0x5EED;
+    let det = std::env::var("REPLAY_DET").is_ok_and(|v| v == "1");
+    if det {
+        moor_common::util::det::enable(BASE_SECS, SEED);
+    }
     let features = Arc::new(moor_kernel::config::FeaturesConfig::default());
     let (db, _) = TxDB::try_open(None, DatabaseConfig::default()).expect("open db");
     {
@@ -206,6 +214,10 @@ fn main() {
     let mut emitted = 0usize;
     for (step, (c, label)) in cmds.iter().enumerate() {
         sink.lock().unwrap().step = step;
+        if det {
+            // Block context for this step: one block per command, 60s apart.
+            moor_common::util::det::set_block(BASE_SECS + 60 * step as u64, SEED ^ step as u64);
+        }
         let result = match c {
             None => "boot".to_string(),
             Some((p, cmd)) => {
