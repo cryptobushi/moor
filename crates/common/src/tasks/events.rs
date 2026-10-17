@@ -164,8 +164,8 @@ impl NarrativeEvent {
         metadata: Option<Vec<(Symbol, Var)>>,
     ) -> Self {
         Self {
-            event_id: Uuid::now_v7(),
-            timestamp: SystemTime::now(),
+            event_id: crate::util::det::uuid_v7(),
+            timestamp: crate::util::det::now_system(),
             author,
             event: Event::Notify {
                 value,
@@ -180,8 +180,8 @@ impl NarrativeEvent {
     #[must_use]
     pub fn set_connection_option(author: Var, connection: Obj, option: Symbol, value: Var) -> Self {
         Self {
-            event_id: Uuid::now_v7(),
-            timestamp: SystemTime::now(),
+            event_id: crate::util::det::uuid_v7(),
+            timestamp: crate::util::det::now_system(),
             author,
             event: Event::SetConnectionOption {
                 connection,
@@ -194,8 +194,8 @@ impl NarrativeEvent {
     #[must_use]
     pub fn data(author: Var, namespace: Symbol, kind: Symbol, payload: Var) -> Self {
         Self {
-            event_id: Uuid::now_v7(),
-            timestamp: SystemTime::now(),
+            event_id: crate::util::det::uuid_v7(),
+            timestamp: crate::util::det::now_system(),
             author,
             event: Event::Data {
                 namespace,
