@@ -13,6 +13,7 @@ members = [
     "crates/git-worker",
     "crates/kernel",
     "crates/objdef",
+    "crates/replay-worker",
     "crates/runtime-api",
     "crates/schema",
     "crates/schema-macros",

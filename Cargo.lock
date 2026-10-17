@@ -6067,6 +6067,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "replay-worker"
+version = "0.0.0"
+dependencies = [
+ "moor-common",
+ "moor-compiler",
+ "moor-db",
+ "moor-kernel",
+ "moor-objdef",
+ "moor-var",
+ "semver",
+ "serde_json",
+ "tempfile",
+ "uuid 1.26.1",
+]
+
+[[package]]
 name = "reqwest"
 version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
