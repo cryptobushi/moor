@@ -454,7 +454,7 @@ mod executor {
 
     const WIZARD: Obj = Obj::mk_id(3);
 
-    struct Factory;
+    pub(super) struct Factory;
     impl SessionFactory for Factory {
         fn mk_background_session(
             self: Arc<Self>,
@@ -465,16 +465,19 @@ mod executor {
     }
 
     /// A fresh database and a deterministic scheduler under a block driver. Holds the process lock.
-    struct World {
+    pub(super) struct World {
         driver: Option<BlockDriver>,
         _guard: std::sync::MutexGuard<'static, ()>,
     }
 
     impl World {
-        fn start() -> Self {
+        pub(super) fn start() -> Self {
+            Self::start_with(DeterministicMode::on())
+        }
+
+        pub(super) fn start_with(mode: DeterministicMode) -> Self {
             let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
             deterministic::disable();
-            let mode = DeterministicMode::on();
             deterministic::configure(&mode);
             let scheduler = Scheduler::new(
                 semver::Version::new(0, 1, 0),
@@ -498,11 +501,11 @@ mod executor {
             }
         }
 
-        fn driver(&mut self) -> &mut BlockDriver {
+        pub(super) fn driver(&mut self) -> &mut BlockDriver {
             self.driver.as_mut().expect("driver")
         }
 
-        fn block(&mut self, height: u64, evals: &[&str]) -> BlockOutput {
+        pub(super) fn block(&mut self, height: u64, evals: &[&str]) -> BlockOutput {
             let inputs = evals
                 .iter()
                 .map(|code| {
@@ -537,7 +540,7 @@ mod executor {
         }
     }
 
-    fn block(height: u64) -> BlockContext {
+    pub(super) fn block(height: u64) -> BlockContext {
         BlockContext {
             height,
             timestamp: 1_700_000_000 + 60 * height,
@@ -546,7 +549,7 @@ mod executor {
     }
 
     /// The `notify` texts of a batch, in batch order.
-    fn texts(events: &[BlockEvent]) -> Vec<String> {
+    pub(super) fn texts(events: &[BlockEvent]) -> Vec<String> {
         events
             .iter()
             .filter_map(|e| match &e.kind {
@@ -560,7 +563,7 @@ mod executor {
     }
 
     /// Every field of every event, ids and timestamps included.
-    fn canonical(events: &[BlockEvent]) -> String {
+    pub(super) fn canonical(events: &[BlockEvent]) -> String {
         events
             .iter()
             .map(|e| {
@@ -1313,5 +1316,838 @@ mod ordering {
         let runs: Vec<String> = (0..8).map(child).collect();
         assert!(runs[0].contains("alpha"), "{}", runs[0]);
         assert!(runs.windows(2).all(|w| w[0] == w[1]), "{runs:#?}");
+    }
+}
+
+/// The admission step (RuneWorld ADR 0005): signed envelopes through the block driver.
+mod admission {
+    use std::sync::Arc;
+
+    use moor_common::{
+        deterministic::DeterministicMode,
+        envelope::{
+            Delegation, Domain, Envelope, EnvelopeKind, SessionSigner, WalletSigner, scope,
+        },
+        tasks::{NoopClientSession, Session},
+    };
+    use moor_kernel::tasks::{
+        block_driver::{BlockEventKind, BlockInput, BlockOutput},
+        envelope_admission::{AdmissionRejection, Admitted},
+    };
+    use moor_var::{Obj, Var, v_int, v_str};
+
+    use super::executor::{World, block, canonical, texts};
+
+    const WIZARD: Obj = Obj::mk_id(3);
+    const DOMAIN: Domain = Domain { salt: [0; 32] };
+    /// A day after the test blocks' time.
+    const EXPIRES: u64 = 1_700_000_000 + 86_400;
+
+    /// Hooks a core provides for the signed world: the creation hook, `user_created`,
+    /// `user_connected`, and a parent for new players with `ping`, `boom` and `disfunc`.
+    const GENESIS: &str = r##"
+        wp = create(#-1);
+        add_property(#0, "wallet_parent", wp, {player, "r"});
+        add_property(#0, "booms", 0, {player, "rw"});
+        add_verb(wp, {player, "rxd", "ping"}, {"any", "any", "any"});
+        set_verb_code(wp, "ping", {"notify(player, \"pong \" + argstr);"});
+        add_verb(wp, {player, "rxd", "boom"}, {"none", "none", "none"});
+        set_verb_code(wp, "boom", {"#0.booms = #0.booms + 1;", "rollback();"});
+        add_verb(wp, {player, "rxd", "disfunc"}, {"this", "none", "this"});
+        set_verb_code(wp, "disfunc", {"notify(this, \"disfunc \" + tostr(this));"});
+        add_verb(#0, {player, "rxd", "create_wallet_player"}, {"this", "none", "this"});
+        set_verb_code(#0, "create_wallet_player", {"p = create(#0.wallet_parent);", "set_player_flag(p, 1);", "p.name = args[2];", "return p;"});
+        add_verb(#0, {player, "rxd", "user_created"}, {"this", "none", "this"});
+        set_verb_code(#0, "user_created", {"notify(args[1], \"created \" + args[1].name);"});
+        add_verb(#0, {player, "rxd", "user_connected"}, {"this", "none", "this"});
+        set_verb_code(#0, "user_connected", {"notify(args[1], \"connected \" + tostr(args[1]));"});
+        return wp;
+    "##;
+
+    fn wallet(n: u8) -> WalletSigner {
+        WalletSigner::from_secret([n; 32]).expect("valid secret")
+    }
+
+    fn key(n: u8) -> SessionSigner {
+        SessionSigner::from_seed([n; 32])
+    }
+
+    fn delegation(session: &SessionSigner, nonce: u64, create: bool, scope: u32) -> Delegation {
+        Delegation {
+            session_key: session.public_key(),
+            box_key: [0xbb; 32],
+            scope,
+            expires: EXPIRES,
+            nonce,
+            create,
+        }
+    }
+
+    fn delegate(w: &WalletSigner, s: &SessionSigner, d: Delegation) -> Envelope {
+        w.delegate(&DOMAIN, s, d, 1_000).expect("sign delegation")
+    }
+
+    fn command(s: &SessionSigner, player: Obj, session: u32, nonce: u32, text: &str) -> Envelope {
+        s.envelope(
+            &DOMAIN,
+            player.as_u64(),
+            EnvelopeKind::Command,
+            session,
+            nonce,
+            1_000,
+            text.as_bytes().to_vec(),
+        )
+    }
+
+    fn noop() -> Arc<dyn Session> {
+        Arc::new(NoopClientSession::new())
+    }
+
+    /// A world with the genesis hooks, at height 1.
+    fn world() -> World {
+        world_with(DeterministicMode::on())
+    }
+
+    fn world_with(mode: DeterministicMode) -> World {
+        let mut world = World::start_with(mode);
+        let out = world.block(1, &[GENESIS]);
+        assert!(
+            matches!(out.outcomes[0].result, Some(Ok(_))),
+            "genesis failed: {:?}",
+            out.outcomes[0].result
+        );
+        world
+    }
+
+    /// Run envelopes as one block at `height`.
+    fn run(world: &mut World, height: u64, envs: &[&Envelope]) -> BlockOutput {
+        let driver = world.driver();
+        driver.begin_block(block(height));
+        for env in envs {
+            driver.submit_envelope(&env.encode(), noop());
+        }
+        driver.end_block()
+    }
+
+    fn verdicts(out: &BlockOutput) -> Vec<Result<Admitted, AdmissionRejection>> {
+        out.outcomes
+            .iter()
+            .map(|o| o.admission.clone().expect("envelope outcome"))
+            .collect()
+    }
+
+    fn rejection(out: &BlockOutput, i: usize) -> AdmissionRejection {
+        out.outcomes[i]
+            .admission
+            .clone()
+            .expect("envelope outcome")
+            .expect_err("expected a rejection")
+    }
+
+    /// Mint a player for wallet 1 with session key 1 (session index 1). Returns the player.
+    fn create_player(world: &mut World) -> Obj {
+        let out = run(
+            world,
+            2,
+            &[&delegate(
+                &wallet(1),
+                &key(1),
+                delegation(&key(1), 1, true, scope::PLAY),
+            )],
+        );
+        match verdicts(&out).remove(0) {
+            Ok(Admitted::Delegated {
+                player,
+                session: 1,
+                created: true,
+            }) => player,
+            other => panic!("create failed: {other:?}"),
+        }
+    }
+
+    fn eval(world: &mut World, height: u64, code: &str) -> Var {
+        let out = world.block(height, &[code]);
+        match &out.outcomes[0].result {
+            Some(Ok(v)) => v.clone(),
+            other => panic!("eval failed: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_mints_a_player_with_the_wallet_and_runs_user_created() {
+        let mut world = world();
+        let out = run(
+            &mut world,
+            2,
+            &[&delegate(
+                &wallet(1),
+                &key(1),
+                delegation(&key(1), 1, true, scope::PLAY),
+            )],
+        );
+        let Ok(Admitted::Delegated { player, .. }) = verdicts(&out).remove(0) else {
+            panic!("{:?}", out.outcomes[0].admission);
+        };
+        let name = format!("w-{}", &wallet(1).address().to_hex()[2..10]);
+        assert_eq!(texts(&out.events), [format!("created {name}")]);
+        assert_eq!(
+            eval(
+                &mut world,
+                3,
+                &format!("return {{{player}.wallet, {player}.name, is_player({player})}};")
+            ),
+            moor_var::v_list(&[v_str(&wallet(1).address().to_hex()), v_str(&name), v_int(1)])
+        );
+    }
+
+    #[test]
+    fn create_registers_the_first_session_in_world_state() {
+        let mut world = world();
+        let player = create_player(&mut world);
+        let row = eval(&mut world, 3, "return #0.admission_sessions[1];");
+        let expected = format!(
+            "[\"box_key\" -> \"{}\", \"expires\" -> {EXPIRES}, \"key\" -> \"{}\", \"last_nonce\" -> 0, \"player\" -> {player}, \"revoked\" -> 0, \"scope\" -> 1]",
+            "bb".repeat(32),
+            moor_common::envelope::hex(&key(1).public_key())
+        );
+        assert_eq!(moor_compiler::to_literal(&row), expected);
+    }
+
+    #[test]
+    fn signed_command_runs_as_the_session_player() {
+        let mut world = world();
+        let player = create_player(&mut world);
+        let out = run(
+            &mut world,
+            3,
+            &[&command(&key(1), player, 1, 1, "ping hello")],
+        );
+        assert_eq!(texts(&out.events), ["pong hello"]);
+    }
+
+    #[test]
+    fn invalid_signature_is_rejected_and_runs_nothing() {
+        let mut world = world();
+        let player = create_player(&mut world);
+        let mut env = command(&key(1), player, 1, 1, "ping hello");
+        env.signature[10] ^= 1;
+        let out = run(&mut world, 3, &[&env]);
+        assert_eq!(
+            (rejection(&out, 0), texts(&out.events)),
+            (AdmissionRejection::BadSignature, Vec::<String>::new())
+        );
+    }
+
+    #[test]
+    fn signature_by_another_key_is_rejected() {
+        let mut world = world();
+        let player = create_player(&mut world);
+        let out = run(&mut world, 3, &[&command(&key(9), player, 1, 1, "ping")]);
+        assert_eq!(rejection(&out, 0), AdmissionRejection::BadSignature);
+    }
+
+    #[test]
+    fn rejection_emits_a_rejection_event() {
+        let mut world = world();
+        let player = create_player(&mut world);
+        let out = run(&mut world, 3, &[&command(&key(9), player, 1, 1, "ping")]);
+        assert!(
+            matches!(
+                &out.events[..],
+                [e] if matches!(&e.kind, BlockEventKind::Rejected { kind: Some(EnvelopeKind::Command), session: 1, reason: AdmissionRejection::BadSignature })
+            ),
+            "{:?}",
+            out.events
+        );
+    }
+
+    #[test]
+    fn stale_nonce_is_rejected_and_gaps_are_allowed() {
+        let mut world = world();
+        let player = create_player(&mut world);
+        let out = run(
+            &mut world,
+            3,
+            &[
+                &command(&key(1), player, 1, 5, "ping a"),
+                &command(&key(1), player, 1, 5, "ping b"),
+                &command(&key(1), player, 1, 3, "ping c"),
+                &command(&key(1), player, 1, 9, "ping d"),
+            ],
+        );
+        assert_eq!(
+            (rejection(&out, 1), rejection(&out, 2), texts(&out.events)),
+            (
+                AdmissionRejection::StaleNonce { last: 5, got: 5 },
+                AdmissionRejection::StaleNonce { last: 5, got: 3 },
+                vec!["pong a".to_string(), "pong d".to_string()]
+            )
+        );
+    }
+
+    #[test]
+    fn nonce_is_consumed_when_the_command_aborts() {
+        let mut world = world();
+        let player = create_player(&mut world);
+        let out = run(
+            &mut world,
+            3,
+            &[
+                &command(&key(1), player, 1, 1, "boom"),
+                &command(&key(1), player, 1, 1, "ping again"),
+            ],
+        );
+        assert_eq!(
+            (
+                rejection(&out, 1),
+                eval(
+                    &mut world,
+                    4,
+                    "return {#0.booms, #0.admission_sessions[1][\"last_nonce\"]};"
+                )
+            ),
+            (
+                AdmissionRejection::StaleNonce { last: 1, got: 1 },
+                moor_var::v_list(&[v_int(0), v_int(1)])
+            )
+        );
+    }
+
+    #[test]
+    fn expired_session_is_rejected() {
+        let mut world = world();
+        let player = create_player(&mut world);
+        // Block time at height h is 1_700_000_000 + 60h; EXPIRES is a day later.
+        let height = 86_400 / 60 + 1;
+        // The envelope itself is still valid at `height`; only the session has expired.
+        let env = key(1).envelope(
+            &DOMAIN,
+            player.as_u64(),
+            EnvelopeKind::Command,
+            1,
+            1,
+            height + 10,
+            b"ping".to_vec(),
+        );
+        let out = run(&mut world, height, &[&env]);
+        assert!(matches!(
+            rejection(&out, 0),
+            AdmissionRejection::SessionExpired { session: 1, .. }
+        ));
+    }
+
+    #[test]
+    fn expired_envelope_is_rejected() {
+        let mut world = world();
+        let player = create_player(&mut world);
+        let env = key(1).envelope(
+            &DOMAIN,
+            player.as_u64(),
+            EnvelopeKind::Command,
+            1,
+            1,
+            2,
+            b"ping".to_vec(),
+        );
+        let out = run(&mut world, 3, &[&env]);
+        assert_eq!(
+            rejection(&out, 0),
+            AdmissionRejection::Expired {
+                expiry_height: Some(2),
+                height: 3
+            }
+        );
+    }
+
+    #[test]
+    fn envelope_is_valid_at_its_expiry_height() {
+        let mut world = world();
+        let player = create_player(&mut world);
+        let env = key(1).envelope(
+            &DOMAIN,
+            player.as_u64(),
+            EnvelopeKind::Command,
+            1,
+            1,
+            3,
+            b"ping".to_vec(),
+        );
+        let out = run(&mut world, 3, &[&env]);
+        assert_eq!(texts(&out.events), ["pong "]);
+    }
+
+    #[test]
+    fn wrong_scope_is_rejected() {
+        let mut world = world();
+        let out = run(
+            &mut world,
+            2,
+            &[&delegate(
+                &wallet(1),
+                &key(1),
+                delegation(&key(1), 1, true, scope::BUILD),
+            )],
+        );
+        let player = verdicts(&out)[0].clone().unwrap().player();
+        let out = run(&mut world, 3, &[&command(&key(1), player, 1, 1, "ping")]);
+        assert_eq!(
+            rejection(&out, 0),
+            AdmissionRejection::WrongScope {
+                kind: EnvelopeKind::Command,
+                scope: scope::BUILD
+            }
+        );
+    }
+
+    #[test]
+    fn replayed_delegation_is_rejected() {
+        let mut world = world();
+        let env = delegate(
+            &wallet(1),
+            &key(1),
+            delegation(&key(1), 1, true, scope::PLAY),
+        );
+        run(&mut world, 2, &[&env]);
+        let out = run(&mut world, 3, &[&env]);
+        assert_eq!(
+            rejection(&out, 0),
+            AdmissionRejection::StaleDelegationNonce { floor: 1, got: 1 }
+        );
+    }
+
+    #[test]
+    fn replayed_second_delegation_hits_the_nonce_floor() {
+        let mut world = world();
+        create_player(&mut world);
+        let second = delegate(
+            &wallet(1),
+            &key(2),
+            delegation(&key(2), 2, false, scope::PLAY),
+        );
+        let out = run(&mut world, 3, &[&second, &second]);
+        assert_eq!(
+            rejection(&out, 1),
+            AdmissionRejection::StaleDelegationNonce { floor: 2, got: 2 }
+        );
+    }
+
+    #[test]
+    fn second_session_signs_independently() {
+        let mut world = world();
+        let player = create_player(&mut world);
+        let out = run(
+            &mut world,
+            3,
+            &[
+                &delegate(
+                    &wallet(1),
+                    &key(2),
+                    delegation(&key(2), 2, false, scope::PLAY),
+                ),
+                &command(&key(1), player, 1, 1, "ping one"),
+                &command(&key(2), player, 2, 1, "ping two"),
+            ],
+        );
+        assert_eq!(texts(&out.events), ["pong one", "pong two"]);
+    }
+
+    #[test]
+    fn create_for_an_existing_wallet_is_rejected() {
+        let mut world = world();
+        let player = create_player(&mut world);
+        let out = run(
+            &mut world,
+            3,
+            &[&delegate(
+                &wallet(1),
+                &key(2),
+                delegation(&key(2), 2, true, scope::PLAY),
+            )],
+        );
+        assert_eq!(
+            rejection(&out, 0),
+            AdmissionRejection::WalletHasPlayer {
+                wallet: wallet(1).address(),
+                player
+            }
+        );
+    }
+
+    #[test]
+    fn delegation_from_an_unknown_wallet_without_create_is_rejected() {
+        let mut world = world();
+        let out = run(
+            &mut world,
+            2,
+            &[&delegate(
+                &wallet(7),
+                &key(7),
+                delegation(&key(7), 1, false, scope::PLAY),
+            )],
+        );
+        assert_eq!(
+            rejection(&out, 0),
+            AdmissionRejection::UnknownWallet(wallet(7).address())
+        );
+    }
+
+    #[test]
+    fn revoke_then_command_is_rejected() {
+        let mut world = world();
+        let player = create_player(&mut world);
+        let revoke = key(1).envelope(
+            &DOMAIN,
+            player.as_u64(),
+            EnvelopeKind::Revoke,
+            1,
+            1,
+            1_000,
+            vec![],
+        );
+        let out = run(
+            &mut world,
+            3,
+            &[&revoke, &command(&key(1), player, 1, 2, "ping")],
+        );
+        assert_eq!(
+            verdicts(&out),
+            [
+                Ok(Admitted::Revoked {
+                    player,
+                    sessions: vec![1]
+                }),
+                Err(AdmissionRejection::SessionRevoked(1))
+            ]
+        );
+    }
+
+    #[test]
+    fn revoke_all_from_the_wallet_revokes_every_session() {
+        let mut world = world();
+        let player = create_player(&mut world);
+        let revoke_all = wallet(1).revoke_all(&DOMAIN, 3, 1_000).unwrap();
+        let out = run(
+            &mut world,
+            3,
+            &[
+                &delegate(
+                    &wallet(1),
+                    &key(2),
+                    delegation(&key(2), 2, false, scope::PLAY),
+                ),
+                &revoke_all,
+                &command(&key(1), player, 1, 1, "ping"),
+                &command(&key(2), player, 2, 1, "ping"),
+            ],
+        );
+        assert_eq!(
+            verdicts(&out)[1..],
+            [
+                Ok(Admitted::Revoked {
+                    player,
+                    sessions: vec![1, 2]
+                }),
+                Err(AdmissionRejection::SessionRevoked(1)),
+                Err(AdmissionRejection::SessionRevoked(2))
+            ]
+        );
+    }
+
+    #[test]
+    fn revoke_all_replay_is_rejected() {
+        let mut world = world();
+        create_player(&mut world);
+        let revoke_all = wallet(1).revoke_all(&DOMAIN, 3, 1_000).unwrap();
+        let out = run(&mut world, 3, &[&revoke_all, &revoke_all]);
+        assert_eq!(
+            rejection(&out, 1),
+            AdmissionRejection::StaleDelegationNonce { floor: 3, got: 3 }
+        );
+    }
+
+    #[test]
+    fn connect_runs_user_connected() {
+        let mut world = world();
+        let player = create_player(&mut world);
+        let connect = key(1).envelope(
+            &DOMAIN,
+            player.as_u64(),
+            EnvelopeKind::Connect,
+            1,
+            1,
+            1_000,
+            vec![],
+        );
+        let out = run(&mut world, 3, &[&connect]);
+        assert_eq!(texts(&out.events), [format!("connected {player}")]);
+    }
+
+    #[test]
+    fn connect_with_text_is_malformed() {
+        let mut world = world();
+        let player = create_player(&mut world);
+        let connect = key(1).envelope(
+            &DOMAIN,
+            player.as_u64(),
+            EnvelopeKind::Connect,
+            1,
+            1,
+            1_000,
+            b"x".to_vec(),
+        );
+        let out = run(&mut world, 3, &[&connect]);
+        assert!(matches!(
+            rejection(&out, 0),
+            AdmissionRejection::Malformed(_)
+        ));
+    }
+
+    #[test]
+    fn sequencer_disconnect_runs_only_disfunc() {
+        let mut world = world();
+        let player = create_player(&mut world);
+        let driver = world.driver();
+        driver.begin_block(block(3));
+        driver.submit(BlockInput::SequencerDisconnect { player }, noop());
+        let out = driver.end_block();
+        assert_eq!(texts(&out.events), [format!("disfunc {player}")]);
+    }
+
+    #[test]
+    fn envelope_for_another_domain_is_rejected() {
+        let mut world = world_with(DeterministicMode {
+            domain_salt: [7; 32],
+            ..DeterministicMode::on()
+        });
+        let out = run(
+            &mut world,
+            2,
+            &[&delegate(
+                &wallet(1),
+                &key(1),
+                delegation(&key(1), 1, true, scope::PLAY),
+            )],
+        );
+        // The wallet signature recovers to some other address, so the proof of possession is
+        // checked against a different digest too; either way nothing is created.
+        assert!(matches!(
+            rejection(&out, 0),
+            AdmissionRejection::BadSignature | AdmissionRejection::BadWalletSignature(_)
+        ));
+    }
+
+    #[test]
+    fn garbage_bytes_are_malformed() {
+        let mut world = world();
+        let driver = world.driver();
+        driver.begin_block(block(2));
+        driver.submit_envelope(&[0, 1, 2], noop());
+        let out = driver.end_block();
+        assert!(matches!(
+            rejection(&out, 0),
+            AdmissionRejection::Malformed(_)
+        ));
+    }
+
+    #[test]
+    fn admission_properties_belong_to_the_system_principal_and_are_read_only() {
+        let mut world = world();
+        let player = create_player(&mut world);
+        assert_eq!(
+            eval(
+                &mut world,
+                3,
+                &format!(
+                    "return {{property_info({player}, \"wallet\"), \
+                     property_info(#0, \"admission_sessions\"), \
+                     property_info(#0, \"admission_wallets\"), #0.owner}};"
+                )
+            ),
+            moor_var::v_list(&[
+                moor_var::v_list(&[WIZARD.into(), v_str("r")]),
+                moor_var::v_list(&[WIZARD.into(), v_str("r")]),
+                moor_var::v_list(&[WIZARD.into(), v_str("r")]),
+                WIZARD.into(),
+            ])
+        );
+    }
+
+    /// The signed log the cross-process test replays: create, a second session, commands with a
+    /// gap, an aborted command, a rejection, a revoke, a connect.
+    fn signed_log(player: Obj) -> Vec<Vec<Envelope>> {
+        vec![
+            vec![delegate(
+                &wallet(1),
+                &key(1),
+                delegation(&key(1), 1, true, scope::PLAY),
+            )],
+            vec![
+                delegate(
+                    &wallet(1),
+                    &key(2),
+                    delegation(&key(2), 2, false, scope::PLAY),
+                ),
+                key(1).envelope(
+                    &DOMAIN,
+                    player.as_u64(),
+                    EnvelopeKind::Connect,
+                    1,
+                    1,
+                    1_000,
+                    vec![],
+                ),
+                command(&key(1), player, 1, 2, "ping one"),
+                command(&key(2), player, 2, 7, "ping two"),
+                command(&key(1), player, 1, 3, "boom"),
+                command(&key(1), player, 1, 3, "ping stale"),
+            ],
+            vec![
+                key(2).envelope(
+                    &DOMAIN,
+                    player.as_u64(),
+                    EnvelopeKind::Revoke,
+                    2,
+                    8,
+                    1_000,
+                    b"1".to_vec(),
+                ),
+                command(&key(1), player, 1, 4, "ping revoked"),
+                command(&key(2), player, 2, 9, "ping still here"),
+            ],
+        ]
+    }
+
+    /// Run the signed log in a fresh world; returns every batch and the final admission state.
+    fn signed_run() -> String {
+        let mut world = world();
+        // The player id the log signs for is the one the first delegation mints: max_object + 1.
+        let player = Obj::mk_id(
+            eval(&mut world, 1, "return toint(max_object()) + 1;")
+                .as_integer()
+                .unwrap() as i32,
+        );
+        let mut transcript = Vec::new();
+        for (i, envs) in signed_log(player).iter().enumerate() {
+            let refs: Vec<&Envelope> = envs.iter().collect();
+            let out = run(&mut world, 2 + i as u64, &refs);
+            assert_eq!(out.conflicts, 0);
+            transcript.push(canonical(&out.events));
+        }
+        let state = eval(
+            &mut world,
+            9,
+            "return {#0.admission_sessions, #0.admission_wallets, #0.booms};",
+        );
+        transcript.push(moor_compiler::to_literal(&state));
+        transcript.join("\n--\n")
+    }
+
+    #[test]
+    fn signed_log_is_identical_across_20_runs() {
+        let first = signed_run();
+        assert!(
+            first.contains("pong still here") && first.contains("session 1 is revoked"),
+            "{first}"
+        );
+        for _ in 1..20 {
+            assert_eq!(signed_run(), first);
+        }
+    }
+
+    #[test]
+    #[ignore = "run as a subprocess by signed_log_is_identical_across_processes"]
+    fn signed_log_child() {
+        println!("SIGNED-BEGIN\n{}\nSIGNED-END", signed_run());
+    }
+
+    #[test]
+    fn signed_log_is_identical_across_processes() {
+        let child = || {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "admission::signed_log_child",
+                    "--exact",
+                    "--ignored",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .output()
+                .expect("run child");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let begin = stdout.find("SIGNED-BEGIN\n").unwrap() + "SIGNED-BEGIN\n".len();
+            let end = stdout.find("\nSIGNED-END").unwrap();
+            stdout[begin..end].to_string()
+        };
+        let runs: Vec<String> = (0..3).map(|_| child()).collect();
+        assert!(runs.windows(2).all(|w| w[0] == w[1]), "{runs:#?}");
+    }
+
+    /// Verify costs: one Ed25519 (ZIP-215) verify per command, one ecrecover per delegation, and the
+    /// whole admitted command through the block driver. Run with `--ignored --nocapture`, in debug
+    /// and with `--release`.
+    #[test]
+    #[ignore = "measurement, not a check"]
+    fn perf_admission_costs() {
+        use moor_common::envelope::{envelope_digest, recover_wallet, verify_session_signature};
+        const N: u32 = 2_000;
+        let s = key(1);
+        let digest = envelope_digest(
+            &DOMAIN,
+            5,
+            &s.public_key(),
+            EnvelopeKind::Command,
+            1,
+            10,
+            b"look",
+        );
+        let sig = s.sign_digest(&digest);
+        let started = std::time::Instant::now();
+        for _ in 0..N {
+            assert!(verify_session_signature(&s.public_key(), &digest, &sig));
+        }
+        let ed = started.elapsed() / N;
+
+        let d = delegation(&s, 1, true, scope::PLAY);
+        let typed = d.digest(&DOMAIN);
+        let wsig = wallet(1).sign_digest(&typed).unwrap();
+        let started = std::time::Instant::now();
+        for _ in 0..N {
+            assert!(recover_wallet(&typed, &wsig).is_ok());
+        }
+        let ec = started.elapsed() / N;
+
+        let mut world = world();
+        let player = create_player(&mut world);
+        let envs: Vec<Envelope> = (1..=N).map(|n| command(&s, player, 1, n, "ping")).collect();
+        let driver = world.driver();
+        driver.begin_block(block(3));
+        let started = std::time::Instant::now();
+        for env in &envs {
+            driver.submit_envelope(&env.encode(), noop());
+        }
+        let signed = started.elapsed() / N;
+        driver.end_block();
+        driver.begin_block(block(4));
+        let started = std::time::Instant::now();
+        for _ in 0..N {
+            driver.submit(
+                BlockInput::Command {
+                    player,
+                    command: "ping".into(),
+                },
+                noop(),
+            );
+        }
+        let unsigned = started.elapsed() / N;
+        driver.end_block();
+        println!(
+            "PERF ed25519 verify {ed:?}/command, ecrecover {ec:?}/delegation, \
+             signed command {signed:?}, unsigned command {unsigned:?}"
+        );
     }
 }
