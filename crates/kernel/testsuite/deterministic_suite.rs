@@ -23,7 +23,7 @@ use moor_common::{
 };
 use moor_compiler::{CompileOptions, compile};
 use moor_db::Database;
-use moor_var::{E_PERM, Obj, SYSTEM_OBJECT, Symbol, Var, v_float, v_int, v_list};
+use moor_var::{E_PERM, Obj, SYSTEM_OBJECT, Symbol, Var, v_float, v_int, v_list, v_map, v_sym};
 
 use crate::common::{compile_verbs, create_db, run_as_verb};
 
@@ -407,4 +407,22 @@ fn environment_builtins_are_refused() {
     ] {
         assert_eq!(det.raised(&format!("return {call};")), E_PERM, "{call}");
     }
+}
+
+#[test]
+fn block_context_reports_height_time_and_command() {
+    let det = Det::start(12, 1_700_010_000, 1);
+    let expected = v_map(&[
+        (v_sym("height"), v_int(12)),
+        (v_sym("time"), v_int(1_700_010_000)),
+        (v_sym("command"), v_int(1)),
+    ]);
+    assert_eq!(det.run("return block_context();"), expected);
+}
+
+#[test]
+fn block_context_command_advances() {
+    let det = Det::start(12, 1_700_010_000, 1);
+    det.run("return 0;");
+    assert_eq!(det.run("return block_context()['command];"), v_int(2));
 }

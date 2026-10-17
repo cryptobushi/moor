@@ -749,6 +749,14 @@ Linux fields are included when the corresponding operating-system counter is ava
 
 - : The timestamp to convert `time`
 
+### `block_context`
+
+**Description:** Returns `['height -> int, 'time -> int, 'command -> int]`: the height and timestamp
+of the block being executed and the index of the current command within it. In deterministic mode
+these are the values the driver supplied, and `time()`, `ftime()` and `ctime()` report the same block
+time. Outside deterministic mode `'height` and `'command` are 0 and `'time` is the wall clock.
+**Arguments:** None
+
 ## Server Control and Information
 
 ### `shutdown`

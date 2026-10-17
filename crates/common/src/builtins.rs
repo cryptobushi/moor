@@ -165,6 +165,7 @@ fn mk_builtin_table() -> Vec<Builtin> {
         mk_builtin("program_cache_stats", Q(0), Q(0), vec![], true),
         mk_builtin("task_perms", Q(0), Q(0), vec![], true),
         mk_builtin("db_compact", Q(0), Q(1), vec![Typed(TYPE_LIST)], true),
+        mk_builtin("block_context", Q(0), Q(0), vec![], true),
     ]);
     // IMPORTANT: ALWAYS APPEND NEW BUILTINS ABOVE THIS LINE
     pad_group(&mut builtins, start, "server/system");

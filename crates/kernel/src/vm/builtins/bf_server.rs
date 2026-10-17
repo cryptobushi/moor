@@ -479,6 +479,29 @@ fn bf_time(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
     Ok(Ret(v_int(deterministic::now_secs() as i64)))
 }
 
+/// Usage: `map block_context()`
+/// Returns `['height -> int, 'time -> int, 'command -> int]`: the height and timestamp of the
+/// block being executed and the index of the current command within it (0 before the first
+/// command). In deterministic mode these are the values the driver supplied. Otherwise `'height`
+/// and `'command` are 0 and `'time` is the wall-clock time, so code that reads the block context
+/// runs unchanged on a development server.
+fn bf_block_context(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
+    if !bf_args.args.is_empty() {
+        return Err(ErrValue(
+            E_ARGS.msg("block_context() does not take any arguments"),
+        ));
+    }
+    let (height, time, command) = match deterministic::current() {
+        Some(ctx) => (ctx.block.height, ctx.block.timestamp, ctx.command),
+        None => (0, deterministic::now_secs(), 0),
+    };
+    Ok(Ret(v_map(&[
+        (v_sym("height"), v_int(height as i64)),
+        (v_sym("time"), v_int(time as i64)),
+        (v_sym("command"), v_int(command as i64)),
+    ])))
+}
+
 /// Usage: `float ftime([int mode])`
 /// Returns the current time as a float with sub-second precision since Unix epoch.
 /// If mode is 1/true, returns server uptime in seconds instead.
@@ -1566,6 +1589,7 @@ pub(crate) fn register_bf_server(builtins: &mut [BuiltinFunction]) {
     builtins[offset_for_builtin("time")] = bf_time;
     builtins[offset_for_builtin("ftime")] = bf_ftime;
     builtins[offset_for_builtin("ctime")] = bf_ctime;
+    builtins[offset_for_builtin("block_context")] = bf_block_context;
     builtins[offset_for_builtin("raise")] = bf_raise;
     builtins[offset_for_builtin("server_version")] = bf_server_version;
     builtins[offset_for_builtin("shutdown")] = bf_shutdown;

@@ -14,6 +14,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased 2.0 series (`main`) branch
 
+- Deterministic mode (`Config.deterministic`) makes time, randomness and generated ids a function of
+  a block context (height, timestamp, seed) supplied by the driver. `time()`, `ftime()` and
+  `ctime()` return block time (UTC, whole seconds). `random()`, `random_bytes()` and default salts
+  draw from a stream keyed by the block seed and command index. `uuid()`, definition ids and event
+  ids derive from the block height, command index and a counter. Wall-clock task limits are off.
+  `connected_players()`, `idle_seconds()` and `connected_seconds()` return constants. The age and
+  PASETO-local builtins and the environment and telemetry builtins raise `E_PERM`. The new
+  `block_context()` builtin returns the height, time and command index. The mode is off by default.
+
 - Term matching and query builtins accept a `case_sensitive` option. It preserves string case in
   matches, repeated bindings, and duplicate removal. Existing calls keep their current behavior.
 
