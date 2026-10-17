@@ -17,7 +17,9 @@ use crate::task_context::{
 use crate::vm::TaskSuspend;
 use crate::vm::builtins::BfErr::{Code, ErrValue};
 use crate::vm::builtins::BfRet::{Ret, RetNil, VmInstr};
-use crate::vm::builtins::{BfCallState, BfErr, BfRet, BuiltinFunction, world_state_bf_err};
+use crate::vm::builtins::{
+    BfCallState, BfErr, BfRet, BuiltinFunction, reject_in_deterministic_mode, world_state_bf_err,
+};
 use crate::vm::vm_host::ExecutionResult;
 use moor_common::builtins::offset_for_builtin;
 use moor_common::deterministic;
@@ -343,6 +345,7 @@ fn bf_switch_player(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
 /// Returns info about external workers. Each entry is `{type, count, queue_size,
 /// avg_response_ms, last_ping_secs}`. Wizard-only.
 fn bf_workers(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
+    reject_in_deterministic_mode("workers")?;
     if !bf_args.args.is_empty() {
         return Err(ErrValue(
             E_ARGS.msg("workers() does not take any arguments"),
@@ -503,6 +506,7 @@ fn require_connection_ownership(
 /// Returns all options for connection object as `{name, value}` pairs.
 /// Argument must be a connection object (negative ID), not a player.
 fn bf_connection_options(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
+    reject_in_deterministic_mode("connection_options")?;
     if bf_args.args.len() != 1 {
         return Err(ErrValue(
             E_ARGS.msg("connection_options() requires exactly 1 argument"),
@@ -1059,6 +1063,11 @@ fn bf_connected_players(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
     }
     let include_all = !bf_args.args.is_empty() && bf_args.args[0].is_true();
 
+    // The connection registry lives outside the world: deterministic mode sees nobody connected.
+    if deterministic::is_enabled() {
+        return Ok(Ret(v_list(&[])));
+    }
+
     let connected_player_set = current_session()
         .connected_players(include_all)
         .expect("Connected players should always be available");
@@ -1078,6 +1087,10 @@ fn bf_idle_seconds(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
             E_TYPE.msg("idle_seconds() requires an object as the first argument"),
         ));
     };
+    // Connection timing is host state: a constant in deterministic mode.
+    if deterministic::is_enabled() {
+        return Ok(Ret(v_int(0)));
+    }
     let Ok(idle_seconds) = current_session().idle_seconds(who) else {
         return Err(ErrValue(E_INVARG.msg(
             "idle_seconds() requires a valid object as the first argument",
@@ -1100,6 +1113,10 @@ fn bf_connected_seconds(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
             "connected_seconds() requires an object as the first argument",
         )));
     };
+    // Connection timing is host state: a constant in deterministic mode.
+    if deterministic::is_enabled() {
+        return Ok(Ret(v_int(0)));
+    }
     let Ok(connected_seconds) = current_session().connected_seconds(who) else {
         return Err(ErrValue(E_INVARG.msg(
             "connected_seconds() requires a valid object as the first argument",
@@ -1113,6 +1130,7 @@ fn bf_connected_seconds(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
 /// Returns a network-specific string identifying the player's connection (e.g., IP address).
 /// Caller must be the player or a wizard.
 fn bf_connection_name(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
+    reject_in_deterministic_mode("connection_name")?;
     if bf_args.args.len() != 1 {
         return Err(ErrValue(
             E_ARGS.msg("connection_name() requires 1 argument"),
@@ -1144,6 +1162,7 @@ fn bf_connection_name(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
 /// Options is a map of Symbol->Var pairs (e.g., ["tls" -> 1, "print_messages" -> 1]).
 /// If search is given, returns only the matching listener (by object or port).
 fn bf_listeners(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
+    reject_in_deterministic_mode("listeners")?;
     if bf_args.args.len() > 1 {
         return Err(ErrValue(
             E_ARGS.msg("listeners() requires 0 or 1 arguments"),

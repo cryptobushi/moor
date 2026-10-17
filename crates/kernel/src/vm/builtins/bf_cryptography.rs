@@ -36,29 +36,19 @@ use std::{io::Read, sync::LazyLock};
 use tracing::{error, warn};
 
 use crate::vm::builtins::{
-    BfCallState, BfErr, BfRet, BfRet::Ret, BuiltinFunction, unix_crypt_compat,
+    BfCallState, BfErr, BfRet, BfRet::Ret, BuiltinFunction, reject_in_deterministic_mode,
+    unix_crypt_compat,
 };
 use moor_common::deterministic;
 use moor_compiler::{offset_for_builtin, to_literal};
 use moor_var::{
-    E_ARGS, E_INVARG, E_PERM, E_TYPE, Symbol, Var, Variant, v_binary, v_error, v_float, v_int,
-    v_list, v_map, v_obj, v_str, v_string, v_sym,
+    E_ARGS, E_INVARG, E_TYPE, Symbol, Var, Variant, v_binary, v_error, v_float, v_int, v_list,
+    v_map, v_obj, v_str, v_string, v_sym,
 };
 
 static SHA1_SYM: LazyLock<Symbol> = LazyLock::new(|| Symbol::mk("sha1"));
 static SHA256_SYM: LazyLock<Symbol> = LazyLock::new(|| Symbol::mk("sha256"));
 static SHA512_SYM: LazyLock<Symbol> = LazyLock::new(|| Symbol::mk("sha512"));
-
-/// Refuse builtins whose output depends on randomness the library draws from the OS (age keys and
-/// nonces, PASETO nonces). They cannot be replayed, so deterministic mode raises E_PERM (DA R4).
-fn reject_in_deterministic_mode(builtin: &str) -> Result<(), BfErr> {
-    if deterministic::is_enabled() {
-        return Err(BfErr::ErrValue(E_PERM.with_msg(|| {
-            format!("{builtin}() is not available in deterministic mode")
-        })));
-    }
-    Ok(())
-}
 
 /// Usage: `list age_generate_keypair([bool as_bytes])`
 /// Generates an X25519 keypair for age encryption. Returns `{public_key, private_key}`.

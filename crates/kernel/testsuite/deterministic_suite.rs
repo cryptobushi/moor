@@ -366,3 +366,45 @@ fn seconds_left_reports_no_wall_clock_limit() {
     let det = Det::start(10, 1_700_008_000, 7);
     assert_eq!(det.run("return seconds_left();"), v_int(-1));
 }
+
+#[test]
+fn connected_players_is_empty() {
+    let det = Det::start(11, 1_700_009_000, 8);
+    assert_eq!(det.run("return connected_players();"), v_list(&[]));
+}
+
+#[test]
+fn idle_seconds_is_a_constant() {
+    let det = Det::start(11, 1_700_009_000, 8);
+    assert_eq!(det.run("return idle_seconds(#3);"), v_int(0));
+}
+
+#[test]
+fn connected_seconds_is_a_constant() {
+    let det = Det::start(11, 1_700_009_000, 8);
+    assert_eq!(det.run("return connected_seconds(#3);"), v_int(0));
+}
+
+#[test]
+fn environment_builtins_are_refused() {
+    let det = Det::start(11, 1_700_009_000, 8);
+    for call in [
+        "connection_name(#3)",
+        "connection_options(#3)",
+        "listeners()",
+        "workers()",
+        "memory_usage()",
+        "db_disk_size()",
+        "bf_counters()",
+        "db_counters()",
+        "sched_counters()",
+        "log_cache_stats()",
+        "verb_cache_stats()",
+        "property_cache_stats()",
+        "ancestry_cache_stats()",
+        "program_cache_stats()",
+        "task_telemetry()",
+    ] {
+        assert_eq!(det.raised(&format!("return {call};")), E_PERM, "{call}");
+    }
+}

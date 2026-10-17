@@ -23,7 +23,9 @@ use crate::tasks::{
 use crate::vm::TaskInputRequest;
 use crate::vm::builtins::BfErr::ErrValue;
 use crate::vm::builtins::BfRet::{Ret, VmInstr};
-use crate::vm::builtins::{BfCallState, BfErr, BfRet, BuiltinFunction, world_state_bf_err};
+use crate::vm::builtins::{
+    BfCallState, BfErr, BfRet, BuiltinFunction, reject_in_deterministic_mode, world_state_bf_err,
+};
 use crate::vm::vm_host::ExecutionResult;
 use crate::vm::{FinallyReason, TaskSuspend};
 use moor_common::builtins::offset_for_builtin;
@@ -463,6 +465,7 @@ fn bf_active_tasks(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
 /// available task-local deltas, including CPU time, faults, context switches, scheduling state,
 /// last CPU, and wait channel.
 fn bf_task_telemetry(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
+    reject_in_deterministic_mode("task_telemetry")?;
     if bf_args.args.len() > 1 {
         return Err(ErrValue(
             E_ARGS.msg("task_telemetry() requires 0 or 1 arguments"),

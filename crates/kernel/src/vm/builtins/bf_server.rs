@@ -35,7 +35,7 @@ use crate::{
             BfRet,
             BfRet::{Ret, RetNil, VmInstr},
             BuiltinFunction, DiagnosticOutput, bf_perf_counters, parse_diagnostic_options,
-            world_state_bf_err,
+            reject_in_deterministic_mode, world_state_bf_err,
         },
         vm_host::ExecutionResult,
     },
@@ -721,6 +721,7 @@ fn bf_server_log(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
 /// Logs property, verb, and ancestry cache statistics to the server log. Wizard-only.
 /// The format mirrors LambdaMOO-style cache counters and hit rates.
 fn bf_log_cache_stats(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
+    reject_in_deterministic_mode("log_cache_stats")?;
     if !bf_args.args.is_empty() {
         return Err(ErrValue(
             E_ARGS.msg("log_cache_stats() does not take any arguments"),
@@ -1024,6 +1025,7 @@ fn bf_gc_collect(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
 /// Usage: `list memory_usage()`
 /// Returns `{block_size, pages_used, pages_free}` for the server process. Wizard-only.
 fn bf_memory_usage(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
+    reject_in_deterministic_mode("memory_usage")?;
     if !bf_args.args.is_empty() {
         return Err(ErrValue(
             E_ARGS.msg("memory_usage() does not take any arguments"),
@@ -1077,6 +1079,7 @@ fn bf_memory_usage(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
 /// Usage: `int db_disk_size()`
 /// Returns the number of bytes currently occupied by the database on disk. Wizard-only.
 fn db_disk_size(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
+    reject_in_deterministic_mode("db_disk_size")?;
     if !bf_args.args.is_empty() {
         return Err(ErrValue(
             E_ARGS.msg("db_disk_size() does not take any arguments"),
@@ -1201,6 +1204,7 @@ fn bf_counter_entries() -> Vec<MetricEntry> {
 /// Usage: `map bf_counters()`
 /// Returns performance counters for builtin functions as `{name -> {count, nanos}}`. Wizard-only.
 fn bf_bf_counters(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
+    reject_in_deterministic_mode("bf_counters")?;
     bf_args.require_wizard_or_builtin_call()?;
 
     let _counters = bf_perf_counters();
@@ -1213,6 +1217,7 @@ fn bf_bf_counters(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
 /// Usage: `map db_counters()`
 /// Returns performance counters for database operations as `{name -> {count, nanos}}`. Wizard-only.
 fn bf_db_counters(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
+    reject_in_deterministic_mode("db_counters")?;
     bf_args.require_wizard_or_builtin_call()?;
 
     Ok(Ret(counter_map_from_entries(
@@ -1224,6 +1229,7 @@ fn bf_db_counters(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
 /// Usage: `map sched_counters()`
 /// Returns performance counters for scheduler operations as `{name -> {count, nanos}}`. Wizard-only.
 fn bf_sched_counters(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
+    reject_in_deterministic_mode("sched_counters")?;
     bf_args.require_wizard_or_builtin_call()?;
 
     let _counters = sched_counters();
@@ -1418,6 +1424,7 @@ fn make_cache_stats_list(cache_stats: &moor_db::CacheStats) -> Var {
 /// `histogram` is a simplified `{0, entries}` list and `flushes` is the closest
 /// analog to the LambdaMOO cache generation counter.
 fn bf_verb_cache_stats(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
+    reject_in_deterministic_mode("verb_cache_stats")?;
     if !bf_args.args.is_empty() {
         return Err(ErrValue(
             E_ARGS.msg("verb_cache_stats() does not take any arguments"),
@@ -1433,6 +1440,7 @@ fn bf_verb_cache_stats(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
 /// `histogram` is a simplified `{0, entries}` list and `flushes` is the closest
 /// analog to the LambdaMOO cache generation counter.
 fn bf_property_cache_stats(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
+    reject_in_deterministic_mode("property_cache_stats")?;
     if !bf_args.args.is_empty() {
         return Err(ErrValue(
             E_ARGS.msg("property_cache_stats() does not take any arguments"),
@@ -1448,6 +1456,7 @@ fn bf_property_cache_stats(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr
 /// `histogram` is a simplified `{0, entries}` list and `flushes` is the closest
 /// analog to the LambdaMOO cache generation counter.
 fn bf_ancestry_cache_stats(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
+    reject_in_deterministic_mode("ancestry_cache_stats")?;
     if !bf_args.args.is_empty() {
         return Err(ErrValue(
             E_ARGS.msg("ancestry_cache_stats() does not take any arguments"),
@@ -1465,6 +1474,7 @@ fn bf_ancestry_cache_stats(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr
 /// - `global`: `{hits, misses, inserts, reclaimed, live_slots}`
 /// - `task`: `{hits, misses, inserts, reclaimed, total_slots, live_slots, key_count}`
 fn bf_program_cache_stats(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
+    reject_in_deterministic_mode("program_cache_stats")?;
     if !bf_args.args.is_empty() {
         return Err(ErrValue(
             E_ARGS.msg("program_cache_stats() does not take any arguments"),
