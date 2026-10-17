@@ -24,7 +24,8 @@ use crate::vm::TaskInputRequest;
 use crate::vm::builtins::BfErr::ErrValue;
 use crate::vm::builtins::BfRet::{Ret, VmInstr};
 use crate::vm::builtins::{
-    BfCallState, BfErr, BfRet, BuiltinFunction, reject_in_deterministic_mode, world_state_bf_err,
+    BfCallState, BfErr, BfRet, BuiltinFunction, reject_in_deterministic_mode,
+    reject_timed_wakeup_in_deterministic_mode, world_state_bf_err,
 };
 use crate::vm::vm_host::ExecutionResult;
 use crate::vm::{FinallyReason, TaskSuspend};
@@ -60,6 +61,11 @@ fn bf_suspend(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
             return Err(ErrValue(
                 E_INVARG.msg("suspend() requires a positive number as the first argument"),
             ));
+        }
+        // `suspend(0)` commits and continues inline (the immediate fast path), which is already
+        // deterministic. Any longer suspension would need a timer.
+        if seconds > 0.0 {
+            reject_timed_wakeup_in_deterministic_mode("suspend()")?;
         }
         TaskSuspend::Timed(Duration::from_secs_f64(seconds))
     };
@@ -190,6 +196,13 @@ fn bf_wait_task(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
 fn bf_read(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
     if bf_args.args.len() > 2 {
         return Err(ErrValue(E_ARGS.msg("read() requires 0 to 2 arguments")));
+    }
+    // Input lines are sequenced commands in deterministic mode; a task waiting for a line would
+    // outlive its block.
+    if moor_common::deterministic::is_enabled() {
+        return Err(ErrValue(
+            E_INVARG.msg("read() is not available in deterministic mode"),
+        ));
     }
 
     let current_player = bf_args.player();
@@ -853,6 +866,7 @@ fn bf_task_recv(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
             None
         } else {
             let duration = Duration::from_secs_f64(seconds);
+            reject_timed_wakeup_in_deterministic_mode("task_recv()")?;
             if duration < Duration::from_millis(1) {
                 None
             } else {
@@ -1083,6 +1097,7 @@ fn parse_schedule_call(
 /// `caller_perms()`.
 fn bf_schedule_at(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
     let (target, verb, when, args, options) = parse_schedule_call(bf_args, "schedule_at")?;
+    reject_timed_wakeup_in_deterministic_mode("schedule_at()")?;
     if when < 0.0 {
         return Err(ErrValue(E_INVARG.msg("schedule_at(): time must be >= 0")));
     }
@@ -1116,6 +1131,7 @@ fn bf_schedule_at(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
 /// by default. Created when this task commits; discarded on rollback/retry.
 fn bf_schedule_every(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
     let (target, verb, interval, args, options) = parse_schedule_call(bf_args, "schedule_every")?;
+    reject_timed_wakeup_in_deterministic_mode("schedule_every()")?;
     if interval <= 0.0 {
         return Err(ErrValue(
             E_INVARG.msg("schedule_every(): interval must be > 0"),

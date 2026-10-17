@@ -24,7 +24,7 @@ use moor_common::{
     util::BitEnum,
 };
 use moor_compiler::{CompileOptions, Program, compile};
-use moor_var::{E_MAXREC, List, Obj, Symbol, Var, v_none};
+use moor_var::{E_INVARG, E_MAXREC, List, Obj, Symbol, Var, v_none};
 use moor_vm::ExecState;
 
 use crate::{
@@ -397,6 +397,14 @@ impl VmHost {
                     }
                 }
                 ExecutionResult::TaskStartFork(delay, task_id, fv_offset) => {
+                    // A delayed fork would outlive its block (ADR 0001 ratification note 1).
+                    if delay.is_some() && moor_common::deterministic::is_enabled() {
+                        result = ExecutionResult::PushError(
+                            E_INVARG
+                                .msg("fork with a delay is not available in deterministic mode"),
+                        );
+                        continue;
+                    }
                     let a = self.vm_exec_state.top().clone();
                     let parent_task_id = self.vm_exec_state.task_id;
                     let mut new_activation = a.clone();

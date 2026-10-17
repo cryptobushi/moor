@@ -517,6 +517,18 @@ pub(crate) fn reject_in_deterministic_mode(builtin: &str) -> Result<(), BfErr> {
     Ok(())
 }
 
+/// Refuse a timed wake-up in deterministic mode. No task may outlive the block that started it
+/// (ADR 0001 ratification note 1), so `fork (n > 0)`, `suspend(n > 0)`, waiting `task_recv()` and
+/// native schedules raise `E_INVARG` instead of arming a timer.
+pub(crate) fn reject_timed_wakeup_in_deterministic_mode(what: &str) -> Result<(), BfErr> {
+    if moor_common::deterministic::is_enabled() {
+        return Err(BfErr::ErrValue(E_INVARG.with_msg(|| {
+            format!("{what}: timed wake-ups are not available in deterministic mode")
+        })));
+    }
+    Ok(())
+}
+
 pub(crate) fn world_state_bf_err(err: WorldStateError) -> BfErr {
     match err {
         WorldStateError::RollbackRetry => BfErr::Rollback,
