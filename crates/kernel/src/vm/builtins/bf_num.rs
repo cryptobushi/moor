@@ -119,8 +119,12 @@ fn bf_random(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
     }
 
     let mut rng = rand::rng();
+    let det = moor_common::util::det::is_enabled();
 
     match bf_args.args.len() {
+        0 if det => Ok(Ret(v_int(
+            moor_common::util::det::random_range(1, i64::MAX).unwrap(),
+        ))),
         0 => Ok(Ret(v_int(rng.random_range(1..=i64::MAX)))),
         1 => {
             let Variant::Int(max) = bf_args.args[0].variant() else {
@@ -128,6 +132,11 @@ fn bf_random(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
             };
             if max < 1 {
                 return Err(BfErr::Code(E_INVARG));
+            }
+            if det {
+                return Ok(Ret(v_int(
+                    moor_common::util::det::random_range(1, max).unwrap(),
+                )));
             }
             Ok(Ret(v_int(rng.random_range(1..=max))))
         }
@@ -140,6 +149,11 @@ fn bf_random(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
             };
             if min < 1 || max < min {
                 return Err(BfErr::Code(E_INVARG));
+            }
+            if det {
+                return Ok(Ret(v_int(
+                    moor_common::util::det::random_range(min, max).unwrap(),
+                )));
             }
             Ok(Ret(v_int(rng.random_range(min..=max))))
         }
