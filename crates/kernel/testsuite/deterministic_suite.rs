@@ -2151,3 +2151,608 @@ mod admission {
         );
     }
 }
+
+/// S0-5: the state root (state encoding v1) under the block driver.
+mod state_root {
+    use std::{
+        collections::BTreeMap,
+        path::Path,
+        sync::{Arc, MutexGuard},
+    };
+
+    use moor_common::{
+        deterministic::{self, BlockContext, DeterministicMode},
+        tasks::{NoopClientSession, NoopSystemControl, Session, SessionError, SessionFactory},
+    };
+    use moor_db::{
+        Database, DatabaseConfig, TxDB,
+        state_root::{
+            RELATIONS, StateRoot,
+            cbor::{Decoder, Encoder},
+            values,
+        },
+    };
+    use moor_kernel::{
+        config::Config,
+        tasks::{
+            NoopTasksDb,
+            block_driver::{BlockDriver, BlockInput, BlockOutput},
+            scheduler::Scheduler,
+        },
+    };
+    use moor_var::{Obj, Symbol, Var};
+
+    use super::{LOCK, common::load_textdump};
+
+    const WIZARD: Obj = Obj::mk_id(3);
+
+    struct Factory;
+    impl SessionFactory for Factory {
+        fn mk_background_session(
+            self: Arc<Self>,
+            _player: &Obj,
+        ) -> Result<Arc<dyn Session>, SessionError> {
+            Ok(Arc::new(NoopClientSession::new()))
+        }
+    }
+
+    /// A deterministic world under a block driver that keeps a handle on its database.
+    struct World {
+        driver: Option<BlockDriver>,
+        db: TxDB,
+        height: u64,
+        /// The wizard inputs run as.
+        player: Obj,
+        _guard: MutexGuard<'static, ()>,
+    }
+
+    impl World {
+        fn start() -> Self {
+            Self::start_with(|| {})
+        }
+
+        /// `before_load` runs after the mode is configured and before the core is loaded.
+        fn start_with(before_load: impl FnOnce()) -> Self {
+            let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            deterministic::disable();
+            let mode = DeterministicMode::on();
+            deterministic::configure(&mode);
+            before_load();
+            let (db, _) = TxDB::try_open(None, DatabaseConfig::default()).unwrap();
+            load_textdump(&db);
+            let scheduler = Scheduler::new(
+                semver::Version::new(0, 1, 0),
+                Box::new(db.clone()),
+                Box::new(NoopTasksDb {}),
+                Arc::new(Config {
+                    deterministic: mode,
+                    ..Config::default()
+                }),
+                Arc::new(NoopSystemControl::default()),
+                None,
+                None,
+            );
+            let driver = scheduler
+                .start_block_driver(Arc::new(Factory))
+                .expect("start block driver");
+            Self {
+                driver: Some(driver),
+                db,
+                height: 0,
+                player: WIZARD,
+                _guard: guard,
+            }
+        }
+
+        fn driver(&mut self) -> &mut BlockDriver {
+            self.driver.as_mut().expect("driver")
+        }
+
+        /// The next block, with one eval input per element of `evals`. Every input must succeed.
+        fn block(&mut self, evals: &[&str]) -> BlockOutput {
+            self.height += 1;
+            let height = self.height;
+            let player = self.player;
+            let inputs = evals
+                .iter()
+                .map(|code| {
+                    let session: Arc<dyn Session> = Arc::new(NoopClientSession::new());
+                    (
+                        BlockInput::Eval {
+                            player,
+                            code: (*code).to_string(),
+                        },
+                        session,
+                    )
+                })
+                .collect();
+            let out = self.driver().run_block(
+                BlockContext {
+                    height,
+                    timestamp: 1_700_000_000 + 60 * height,
+                    seed: [height as u8; 32],
+                },
+                inputs,
+            );
+            for (code, outcome) in evals.iter().zip(&out.outcomes) {
+                assert!(
+                    matches!(outcome.result, Some(Ok(_))),
+                    "{code}: {:?}",
+                    outcome.result
+                );
+            }
+            assert_eq!(out.conflicts, 0);
+            out
+        }
+
+        fn eval(&mut self, code: &str) -> Var {
+            let out = self.block(&[code]);
+            match &out.outcomes[0].result {
+                Some(Ok(v)) => v.clone(),
+                other => panic!("{other:?}"),
+            }
+        }
+
+        /// objdef export, files by name, `manifest.json` (wall-clock) left out.
+        fn objdef(&self) -> BTreeMap<String, String> {
+            let dir = tempfile::tempdir().unwrap();
+            let snapshot = self.db.create_snapshot().unwrap();
+            moor_objdef::dump_snapshot_object_definitions(snapshot.as_ref(), dir.path()).unwrap();
+            let mut files = BTreeMap::new();
+            collect(dir.path(), dir.path(), &mut files);
+            files
+        }
+    }
+
+    fn collect(root: &Path, dir: &Path, out: &mut BTreeMap<String, String>) {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect(root, &path, out);
+            } else if path.file_name().is_some_and(|n| n != "manifest.json") {
+                let name = path
+                    .strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string();
+                out.insert(name, std::fs::read_to_string(&path).unwrap_or_default());
+            }
+        }
+    }
+
+    impl Drop for World {
+        fn drop(&mut self) {
+            if let Some(driver) = self.driver.take() {
+                driver.shutdown().ok();
+            }
+            deterministic::disable();
+        }
+    }
+
+    fn root(out: &BlockOutput) -> StateRoot {
+        out.state_root
+            .clone()
+            .expect("end_block computes the root")
+            .expect("root")
+    }
+
+    fn changed(a: &StateRoot, b: &StateRoot) -> Vec<&'static str> {
+        a.relations
+            .iter()
+            .zip(&b.relations)
+            .filter(|(x, y)| x != y)
+            .map(|(x, _)| x.name)
+            .collect()
+    }
+
+    #[test]
+    fn end_block_reports_one_hash_per_relation() {
+        let mut world = World::start();
+        let out = world.block(&["return 1;"]);
+        let root = root(&out);
+        let names: Vec<_> = root.relations.iter().map(|r| r.name).collect();
+        assert_eq!(names, RELATIONS);
+        assert_eq!(world.driver().state_root().unwrap(), root);
+    }
+
+    /// ADR 0006 decision 3: an empty block writes nothing, so it carries the previous root.
+    #[test]
+    fn an_empty_block_changes_no_relation() {
+        let mut world = World::start();
+        let before = root(&world.block(&["o = create(#1); move(o, #2); return o;"]));
+        for _ in 0..3 {
+            let after = root(&world.block(&[]));
+            assert_eq!(changed(&before, &after), Vec::<&str>::new());
+            assert_eq!(after, before);
+        }
+    }
+
+    /// A block whose inputs only read (or fail before writing) leaves the root unchanged too.
+    #[test]
+    fn a_block_of_reads_changes_no_relation() {
+        let mut world = World::start();
+        let before = root(&world.block(&["return 1;"]));
+        let after = root(&world.block(&[
+            "return {#2.contents, players(), random(10), uuid(), time()};",
+            "return toliteral(#0);",
+        ]));
+        assert_eq!(after, before);
+    }
+
+    #[test]
+    fn a_property_write_changes_the_root_and_exactly_one_relation_hash() {
+        let mut world = World::start();
+        let before =
+            root(&world.block(&["add_property(#0, \"n\", 1, {player, \"rw\"}); return 1;"]));
+        let after = root(&world.block(&["#0.n = 2; return 1;"]));
+        assert_ne!(after.root, before.root);
+        assert_eq!(changed(&before, &after), ["object_propvalues"]);
+    }
+
+    /// The objdef blind spots (spike report): `last_move` and the sequences are not in an objdef
+    /// export, so a change confined to them leaves objdef identical. The root sees both.
+    #[test]
+    fn last_move_and_sequence_changes_are_in_the_root_but_not_in_objdef() {
+        let mut world = World::start();
+        let o = world.eval("o = create(#1); move(o, #2); return o;");
+        let o = o.as_object().expect("object");
+        let before = root(&world.block(&["return 1;"]));
+        let objdef_before = world.objdef();
+
+        // Out and back in a later block: same location, new last_move time.
+        let code = format!("move({o}, #3); move({o}, #2); return 1;");
+        let after_move = root(&world.block(&[code.as_str()]));
+        assert_eq!(changed(&before, &after_move), ["object_last_move"]);
+        assert_eq!(world.objdef(), objdef_before);
+
+        // Create and recycle: every object relation is as before, max object is not.
+        let after_recycle = root(&world.block(&["x = create(#1); recycle(x); return 1;"]));
+        assert_eq!(changed(&after_move, &after_recycle), ["sequences"]);
+        assert_eq!(world.objdef(), objdef_before);
+    }
+
+    /// `contents` order is not extra state: it is derived from `object_location` (S0-3, id order),
+    /// so arriving in a different order gives the same contents and the same root. A different
+    /// arrangement (the spike's step-4 fork, where "take second sword" took the other sword) is a
+    /// different `object_location` relation and so a different root.
+    #[test]
+    fn contents_order_is_covered_through_object_location() {
+        let run = |first: usize, second: usize| {
+            let mut world = World::start();
+            world.eval("a = create(#1); b = create(#1); move(a, #3); move(b, #3); return 1;");
+            let objs = world.eval("return #3.contents;");
+            let objs = objs.as_list().unwrap().clone();
+            let a = objs.iter_ref().nth(first).unwrap().as_object().unwrap();
+            let b = objs.iter_ref().nth(second).unwrap().as_object().unwrap();
+            let code = format!("move({a}, #2); move({b}, #2); return #2.contents;");
+            let contents = world.eval(&code);
+            // Clear last_move differences: both moves happened in the same block.
+            (contents, root(&world.block(&[])))
+        };
+        let (contents_ab, root_ab) = run(0, 1);
+        let (contents_ba, root_ba) = run(1, 0);
+        assert_eq!(contents_ab, contents_ba);
+        assert_eq!(root_ab, root_ba);
+
+        let mut world = World::start();
+        world.eval("a = create(#1); b = create(#1); move(a, #3); move(b, #3); return 1;");
+        let one_moved = |world: &mut World, which: usize| {
+            let code = format!("move(#3.contents[{which}], #2); return 1;");
+            root(&world.block(&[code.as_str()]))
+        };
+        let first = one_moved(&mut world, 1);
+        drop(world);
+        let mut world = World::start();
+        world.eval("a = create(#1); b = create(#1); move(a, #3); move(b, #3); return 1;");
+        let second = one_moved(&mut world, 2);
+        assert_ne!(first.root, second.root);
+        assert!(changed(&first, &second).contains(&"object_location"));
+    }
+
+    fn round_trip(v: &Var) {
+        let mut e = Encoder::new();
+        values::var(&mut e, v).unwrap();
+        let bytes = e.into_bytes();
+        let mut d = Decoder::new(&bytes);
+        let back = values::decode_var(&mut d).unwrap();
+        d.finish().unwrap();
+        let mut e = Encoder::new();
+        values::var(&mut e, &back).unwrap();
+        assert_eq!(e.into_bytes(), bytes, "{v:?}");
+        assert_eq!(&back, v);
+    }
+
+    /// Every Var type, including lambdas (which need the compiler, so are tested here).
+    #[test]
+    fn every_value_type_round_trips_through_the_canonical_encoding() {
+        let mut world = World::start();
+        let values = world.eval(
+            "return {0, 1, -7, 2.5, -0.0, \"Str\", #3, E_PERM, E_INVARG(\"msg\"), \
+             {1, {2}}, ['zeta -> 1, \"a\" -> 2, 3 -> 'c], 'Sym, decode_base64(\"AAEC\"), \
+             <#1, .slot = 'v, {1, 2}>, {x} => x + 1, \
+             fn(a, ?b = 2, @rest) return {a, b, rest}; endfn, \
+             (fn() let y = 5; return {x} => x + y; endfn)(), true, false};",
+        );
+        let list = values.as_list().expect("list").clone();
+        assert_eq!(list.len(), 19);
+        for v in list.iter_ref() {
+            round_trip(v);
+        }
+        round_trip(&values);
+    }
+
+    /// The scenario the cross-process test replays: objects, moves, symbol-keyed maps, lambdas,
+    /// flyweights, `fork (0)`, `random()`, `uuid()`, create and recycle, and an empty block.
+    const SCENARIO: &[&[&str]] = &[
+        &["add_property(#0, \"m\", [], {player, \"rwc\"}); \
+           add_property(#0, \"l\", {}, {player, \"rwc\"}); return 1;"],
+        &["o = create(#1); p = create(#1); move(o, #2); move(p, #2); #0.l = {o, p}; return 1;"],
+        &["#0.m = ['zeta -> 1, 'alpha -> 2, 'Omega -> 3, \"str\" -> 4, 5 -> 'five]; return 1;"],
+        &["#0.m['lam] = {x} => x + 1; \
+           f = fn(a, ?b = 2, @rest) let t = a; return {t, b, rest}; endfn; \
+           #0.l = {@#0.l, f, <#1, .slot = 'v, {1, 2}>}; return 1;"],
+        &["fork (0) #0.l = {@#0.l, random(1000), uuid()}; endfork return 1;"],
+        &[
+            "x = create(#1); recycle(x); return 1;",
+            "move(#0.l[1], #3); return 1;",
+        ],
+        &[],
+    ];
+
+    const INTERN_POOL: &[&str] = &[
+        "zeta", "alpha", "omega", "five", "lam", "slot", "v", "m", "l",
+    ];
+
+    /// Child half of the cross-process test: interns a symbol pool in an order chosen by
+    /// `RW_STATE_ROOT_INTERN` before loading, runs the scenario, prints one root per block.
+    #[test]
+    #[ignore = "run as a subprocess by state_root_is_identical_across_20_processes"]
+    fn state_root_child() {
+        let rotate: usize = std::env::var("RW_STATE_ROOT_INTERN")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        let mut world = World::start_with(|| {
+            let n = INTERN_POOL.len();
+            for i in 0..n {
+                let name = INTERN_POOL[(i + rotate) % n];
+                // Alternate case too: interning order and first-seen case both vary.
+                let name = if rotate % 2 == 1 {
+                    name.to_uppercase()
+                } else {
+                    name.to_string()
+                };
+                let _ = Symbol::mk(&name);
+            }
+        });
+        let mut lines = Vec::new();
+        for block in SCENARIO {
+            let out = world.block(block);
+            let r = root(&out);
+            lines.push(format!("{} {}", out.block.height, r.root_hex()));
+        }
+        for r in &world.driver().state_root().unwrap().relations {
+            lines.push(format!(
+                "{} {} {}",
+                r.name,
+                moor_db::state_root::hex(&r.hash),
+                r.entries
+            ));
+        }
+        println!("ROOTS-BEGIN\n{}\nROOTS-END", lines.join("\n"));
+    }
+
+    fn child_roots(rotate: usize) -> String {
+        let exe = std::env::current_exe().expect("test binary");
+        let output = std::process::Command::new(exe)
+            .args([
+                "state_root::state_root_child",
+                "--exact",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("RW_STATE_ROOT_INTERN", rotate.to_string())
+            .output()
+            .expect("run child");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let begin = stdout.find("ROOTS-BEGIN\n").expect("marker") + "ROOTS-BEGIN\n".len();
+        let end = stdout.find("\nROOTS-END").expect("end marker");
+        stdout[begin..end].to_string()
+    }
+
+    /// 20 fresh processes, each with a different symbol intern order (and std `HashMap` seeds,
+    /// which order program variable declarations), produce the same root after every block.
+    #[test]
+    fn state_root_is_identical_across_20_processes() {
+        let runs: Vec<String> = (0..20).map(child_roots).collect();
+        assert_eq!(
+            runs[0].lines().count(),
+            SCENARIO.len() + RELATIONS.len(),
+            "{}",
+            runs[0]
+        );
+        for (i, run) in runs.iter().enumerate() {
+            assert_eq!(run, &runs[0], "process {i} differs");
+        }
+    }
+
+    /// Child half of the objdef genesis test: loads a 12-object objdef core in deterministic mode
+    /// (genesis block) and prints the state root.
+    #[test]
+    #[ignore = "run as a subprocess by objdef_genesis_root_is_identical_across_processes"]
+    fn objdef_genesis_child() {
+        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        deterministic::disable();
+        deterministic::configure(&DeterministicMode::on());
+        let dir = tempfile::tempdir().unwrap();
+        let mut constants = String::new();
+        for i in 0..12 {
+            constants.push_str(&format!("define O{i} = #{i};\n"));
+            let parent = if i == 0 {
+                String::new()
+            } else {
+                "  parent: O0\n".to_string()
+            };
+            std::fs::write(
+                dir.path().join(format!("o{i}.moo")),
+                format!(
+                    "object O{i}\n  name: \"object {i}\"\n{parent}  owner: O0\n  readable: true\n\n  \
+                     property p{i}a (owner: O0, flags: \"rc\") = {i};\n  \
+                     property p{i}b (owner: O0, flags: \"rc\") = \"{i}\";\n\n  \
+                     verb \"v{i}\" (this none this) owner: O0 flags: \"rxd\"\n    return {i};\n  endverb\nendobject\n"
+                ),
+            )
+            .unwrap();
+        }
+        std::fs::write(dir.path().join("constants.moo"), constants).unwrap();
+        let (db, _) = TxDB::try_open(None, DatabaseConfig::default()).unwrap();
+        let mut loader = db.loader_client().unwrap();
+        moor_objdef::ObjectDefinitionLoader::new(loader.as_mut())
+            .load_objdef_directory(Default::default(), dir.path(), Default::default())
+            .expect("load");
+        loader.commit().unwrap();
+        let root = db.state_root().unwrap();
+        deterministic::disable();
+        println!("\nGENESIS {}", root.root_hex());
+    }
+
+    /// The objdef loader walks its objects in id order, so the derived verb and property ids (R8)
+    /// and therefore the genesis root are the same in every process. It used to walk a `HashMap`.
+    #[test]
+    fn objdef_genesis_root_is_identical_across_processes() {
+        let exe = std::env::current_exe().expect("test binary");
+        let roots: Vec<String> = (0..5)
+            .map(|_| {
+                let output = std::process::Command::new(&exe)
+                    .args([
+                        "state_root::objdef_genesis_child",
+                        "--exact",
+                        "--ignored",
+                        "--nocapture",
+                        "--test-threads=1",
+                    ])
+                    .output()
+                    .expect("run child");
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                let at = stdout.find("GENESIS ").expect("root line");
+                stdout[at..].lines().next().unwrap_or_default().to_string()
+            })
+            .collect();
+        assert!(roots.windows(2).all(|w| w[0] == w[1]), "{roots:#?}");
+    }
+
+    /// Root time against DB size (release build): genesis, then 1,000 and 10,000 created objects,
+    /// each named, moved into a room and given a property value. Loads the objdef core in
+    /// `RW_STATE_ROOT_CORE` (e.g. RuneWorld's stripped `core/`), or the minimal textdump if unset.
+    /// Run: `cargo test --release -p moor-kernel --test deterministic-suite
+    /// state_root::perf_state_root -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "measurement, not a check"]
+    fn perf_state_root() {
+        let core = std::env::var("RW_STATE_ROOT_CORE").ok();
+        let mut world = match &core {
+            Some(dir) => {
+                let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+                deterministic::disable();
+                let mode = DeterministicMode::on();
+                deterministic::configure(&mode);
+                let (db, _) = TxDB::try_open(None, DatabaseConfig::default()).unwrap();
+                {
+                    let mut loader = db.loader_client().unwrap();
+                    moor_objdef::ObjectDefinitionLoader::new(loader.as_mut())
+                        .load_objdef_directory(
+                            moor_compiler::CompileOptions {
+                                custom_errors: true,
+                                ..Default::default()
+                            },
+                            Path::new(dir),
+                            Default::default(),
+                        )
+                        .expect("load core");
+                    loader.commit().unwrap();
+                }
+                let scheduler = Scheduler::new(
+                    semver::Version::new(0, 1, 0),
+                    Box::new(db.clone()),
+                    Box::new(NoopTasksDb {}),
+                    Arc::new(Config {
+                        deterministic: mode,
+                        ..Config::default()
+                    }),
+                    Arc::new(NoopSystemControl::default()),
+                    None,
+                    None,
+                );
+                let driver = scheduler.start_block_driver(Arc::new(Factory)).unwrap();
+                // The RuneWorld core's wizard is #2 (ArchWizard).
+                let player = std::env::var("RW_STATE_ROOT_PLAYER")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .map_or(Obj::mk_id(2), Obj::mk_id);
+                World {
+                    driver: Some(driver),
+                    db,
+                    height: 0,
+                    player,
+                    _guard: guard,
+                }
+            }
+            None => World::start(),
+        };
+        world.driver().set_state_root_at_end_block(false);
+        let wizard = world.eval("return player;");
+        println!(
+            "core: {}, player {wizard:?}",
+            core.as_deref().unwrap_or("minimal textdump")
+        );
+        world.eval(
+            "add_property(#0, \"perf_room\", create(#1), {player, \"rw\"}); \
+             add_property(#1, \"perf_v\", 0, {player, \"rw\"}); return 1;",
+        );
+        let measure = |world: &mut World, label: &str| {
+            let mut times = Vec::new();
+            let mut last = None;
+            for _ in 0..5 {
+                let started = std::time::Instant::now();
+                let r = world.driver().state_root().unwrap();
+                times.push(started.elapsed());
+                last = Some(r);
+            }
+            times.sort();
+            let r = last.unwrap();
+            let entries: u64 = r.relations.iter().map(|d| d.entries).sum();
+            let bytes: usize = RELATIONS
+                .iter()
+                .map(|n| world.driver().canonical_relation(n).unwrap().encode().len())
+                .sum();
+            println!(
+                "{label:>14}: root median {:?} (min {:?}, max {:?}); {entries} entries, {bytes} canonical bytes",
+                times[2], times[0], times[4]
+            );
+        };
+        measure(&mut world, "genesis");
+        let mut created = 0;
+        for target in [1_000, 10_000] {
+            while created < target {
+                // 250 objects per input, each its own transaction-sized chunk.
+                world.eval(
+                    "for i in [1..250] o = create(#1); o.name = \"obj \" + tostr(i); \
+                     move(o, #0.perf_room); o.perf_v = {i, \"v\"}; endfor return 1;",
+                );
+                created += 250;
+            }
+            measure(&mut world, &format!("+{created} objects"));
+        }
+    }
+}
