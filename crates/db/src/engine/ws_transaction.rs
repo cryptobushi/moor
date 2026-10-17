@@ -259,13 +259,7 @@ impl WorldStateTransaction {
             .object_flags
             .scan(&|_, flags| flags.contains(ObjFlag::User))
             .map_err(|e| WorldStateError::DatabaseError(format!("Error getting players: {e:?}")))?;
-        let mut players: Vec<Obj> = players.iter().map(|(k, _)| *k).collect();
-        // TEMPORARY (H1): sort by object id so the order does not depend on the per-process hash
-        // seed. Replaced by ordered indexes in S0-3.
-        if moor_common::deterministic::is_enabled() {
-            players.sort();
-        }
-        Ok(ObjSet::from_iter(players))
+        Ok(ObjSet::from_iter(players.iter().map(|(k, _)| *k)))
     }
 
     pub fn get_max_object(&self) -> Result<Obj, WorldStateError> {
@@ -665,10 +659,6 @@ impl WorldStateTransaction {
         let mut children = Vec::new();
         self.object_parent
             .for_each_by_codomain(obj, |child| children.push(*child));
-        // TEMPORARY (H1): see get_players.
-        if moor_common::deterministic::is_enabled() {
-            children.sort();
-        }
         Ok(ObjSet::from_iter(children))
     }
 
@@ -778,10 +768,6 @@ impl WorldStateTransaction {
         let mut contents = Vec::new();
         self.object_location
             .for_each_by_codomain(obj, |content| contents.push(*content));
-        // TEMPORARY (H1): see get_players.
-        if moor_common::deterministic::is_enabled() {
-            contents.sort();
-        }
         Ok(ObjSet::from_iter(contents))
     }
 

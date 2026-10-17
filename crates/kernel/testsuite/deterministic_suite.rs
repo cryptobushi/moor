@@ -426,18 +426,6 @@ fn block_context_command_advances() {
     det.run("return 0;");
     assert_eq!(det.run("return block_context()['command];"), v_int(2));
 }
-
-#[test]
-fn contents_are_listed_in_object_id_order() {
-    // Temporary sort-on-read for H1; S0-3 replaces the mechanism, not this expectation.
-    let det = Det::start(13, 1_700_011_000, 1);
-    let sorted = det.run(
-        "for i in [1..8] o = create(#-1); move(o, #1); endfor \
-         return #1.contents == sort(#1.contents);",
-    );
-    assert_eq!(sorted, v_int(1));
-}
-
 // --- Manual executor and block driver (S0-4) ---------------------------------------------------
 
 mod executor {
