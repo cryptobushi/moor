@@ -2093,10 +2093,8 @@ impl WorldStateTransaction {
         // Create the last_move map with timestamp and source
         let time_key = Symbol::mk("time");
         let source_key = Symbol::mk("source");
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
+        // Block time in deterministic mode: `last_move` is world state and must replay.
+        let timestamp = moor_common::deterministic::now_secs() as i64;
 
         let last_move_map = v_map(&[
             (Var::from(time_key.to_string()), Var::from(timestamp)),

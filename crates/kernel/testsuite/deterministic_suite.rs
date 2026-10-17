@@ -92,3 +92,12 @@ fn ctime_with_an_argument_formats_in_utc() {
         Var::from("Thu Jan 01 00:00:00 1970 UTC")
     );
 }
+
+#[test]
+fn move_stamps_last_move_with_block_time() {
+    let det = Det::start(2, 1_700_000_600, 1);
+    assert_eq!(
+        det.run("x = create(#-1); move(x, #1); return x.last_move[\"time\"];"),
+        Var::from(1_700_000_600i64)
+    );
+}
