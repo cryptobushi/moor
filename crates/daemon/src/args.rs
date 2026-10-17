@@ -17,7 +17,9 @@ use clap_derive::{Parser, ValueEnum};
 use moor_common::threading::TaskPoolPinningMode;
 use moor_common::util::config_path;
 use moor_db::DatabaseConfig;
-use moor_kernel::config::{Config, ImportExportConfig, ImportFormat, RuntimeConfig};
+use moor_kernel::config::{
+    Config, DeterministicMode, ImportExportConfig, ImportFormat, RuntimeConfig,
+};
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc};
 
@@ -182,6 +184,15 @@ pub struct Args {
 
     #[arg(long, help = "Enable debug logging", default_value = "false")]
     pub debug: bool,
+
+    #[arg(
+        long,
+        help = "Run the world as a deterministic state transition function: block time, seeded \
+                randomness and derived ids replace the clock and OS entropy. The block context is \
+                set by a driver; with none attached the daemon stays in the genesis block. \
+                Independent of any development shortcut."
+    )]
+    pub deterministic: bool,
 
     #[arg(
         long,
@@ -401,6 +412,11 @@ impl Args {
         if let Some(args) = self.runtime_args.as_ref() {
             args.merge_config(&mut config.runtime)?;
         }
+        // The flag turns the mode on; a `deterministic:` section in the config file may already
+        // have set a genesis block, which is kept.
+        if self.deterministic && !config.deterministic.is_on() {
+            config.deterministic = DeterministicMode::on();
+        }
         if let Some(args) = self.feature_args.as_ref() {
             let mut copy = config.features.as_ref().clone();
             args.merge_config(&mut copy)?;
@@ -553,7 +569,7 @@ impl Args {
 mod tests {
     use super::Args;
     use clap::Parser as _;
-    use moor_kernel::config::ImportFormat;
+    use moor_kernel::config::{DeterministicMode, ImportFormat};
 
     fn write_config(contents: &str) -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().expect("create temp dir");
@@ -648,6 +664,53 @@ import_export:
 
         assert!(config.features.custom_errors);
         assert_eq!(config.import_export.import_format, ImportFormat::Textdump);
+    }
+
+    #[test]
+    fn deterministic_mode_is_off_by_default() {
+        let args = Args::try_parse_from(["moor-daemon"]).expect("parse args");
+
+        let config = args.load_config().expect("load config");
+
+        assert_eq!(config.deterministic, DeterministicMode::default());
+    }
+
+    #[test]
+    fn deterministic_flag_turns_the_mode_on() {
+        let args = Args::try_parse_from(["moor-daemon", "--deterministic"]).expect("parse args");
+
+        let config = args.load_config().expect("load config");
+
+        assert!(config.deterministic.is_on());
+    }
+
+    #[test]
+    fn deterministic_section_in_the_config_file_sets_the_genesis_block() {
+        let (_dir, config_path) = write_config(
+            r#"
+deterministic:
+  enabled: true
+  genesis:
+    height: 7
+    timestamp: 1700000000
+    seed: "0000000000000000000000000000000000000000000000000000000000000009"
+"#,
+        );
+        let args = Args::try_parse_from([
+            "moor-daemon",
+            "--config-file",
+            config_path.to_str().expect("utf-8 path"),
+            "--deterministic",
+        ])
+        .expect("parse args");
+
+        let config = args.load_config().expect("load config");
+
+        let genesis = config.deterministic.genesis;
+        assert_eq!(
+            (genesis.height, genesis.timestamp, genesis.seed[31]),
+            (7, 1_700_000_000, 9)
+        );
     }
 
     #[test]

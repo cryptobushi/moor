@@ -197,6 +197,15 @@ struct Args {
     )]
     num_io_threads: i32,
 
+    #[arg(
+        long,
+        help = "Run the world as a deterministic state transition function: block time, seeded \
+                randomness and derived ids replace the clock and OS entropy. The block context is \
+                set by a driver; with none attached the server stays in the genesis block. \
+                Independent of any development shortcut."
+    )]
+    deterministic: bool,
+
     #[arg(long, help = "Enable debug logging", default_value = "false")]
     debug: bool,
 
@@ -611,6 +620,9 @@ fn apply_cli_overrides(args: &Args, config: &mut CombinedConfig) {
     if let Some(directory) = &args.baseline_objdef_dir {
         config.import_export.baseline_objdef_dir = Some(directory.clone());
         config.import_export.git_upstream = None;
+    }
+    if args.deterministic && !config.deterministic.is_on() {
+        config.deterministic = DeterministicMode::on();
     }
     if args.no_telnet {
         config.services.telnet.enabled = false;
