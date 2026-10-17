@@ -35,12 +35,20 @@ use crate::{
 };
 use flume::Sender;
 use moor_common::{
+    model::WorldState,
     tasks::{SchedulerError, Session, TaskId},
     util::Instant,
 };
 use moor_db::Database;
 use std::sync::{Arc, OnceLock};
 use tracing::error;
+
+/// The transaction a dispatched task runs in: opened at dispatch (threaded pool), or opened by
+/// the job itself when the manual executor runs it.
+enum TaskTransaction {
+    Open(Box<dyn WorldState>),
+    AtRun(Arc<dyn Database>),
+}
 
 impl TaskLifecycle {
     #[allow(clippy::too_many_arguments)]
@@ -59,14 +67,20 @@ impl TaskLifecycle {
         let perfc = sched_counters();
         let _t = perfc.timers.start(SchedulerOp::ResumeTask);
 
-        // Start its new transaction...
-        let world_state = match database.new_world_state() {
-            Ok(ws) => ws,
-            Err(e) => {
-                error!(error = ?e, "Could not start transaction for task resumption due to DB error");
-                self.task_q
-                    .finish_failed_wakeup(registration, result_sender);
-                return Err(SchedulerError::CouldNotStartTask);
+        // Start its new transaction... On the manual executor (deterministic mode) the snapshot is
+        // taken when the job runs, not now: a job queued behind another must see that job's commit
+        // (audit S2). Only one transaction is open at a time there, so commits never conflict.
+        let transaction = if self.task_q.thread_pool.is_manual() {
+            TaskTransaction::AtRun(scheduler.database.clone())
+        } else {
+            match database.new_world_state() {
+                Ok(ws) => TaskTransaction::Open(ws),
+                Err(e) => {
+                    error!(error = ?e, "Could not start transaction for task resumption due to DB error");
+                    self.task_q
+                        .finish_failed_wakeup(registration, result_sender);
+                    return Err(SchedulerError::CouldNotStartTask);
+                }
             }
         };
 
@@ -122,6 +136,21 @@ impl TaskLifecycle {
                         task.creation_time,
                     );
                 }
+
+                let world_state = match transaction {
+                    TaskTransaction::Open(world_state) => world_state,
+                    TaskTransaction::AtRun(database) => match database.new_world_state() {
+                        Ok(world_state) => world_state,
+                        Err(e) => {
+                            error!(task_id, error = ?e, "Could not start transaction for queued task");
+                            task_scheduler_client.abort_panicked(
+                                format!("could not start transaction: {e:?}"),
+                                std::backtrace::Backtrace::disabled(),
+                            );
+                            return;
+                        }
+                    },
+                };
 
                 // Set up transaction context for this thread
                 let _tx_guard = TaskGuard::new(

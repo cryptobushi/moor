@@ -99,6 +99,30 @@ impl Scheduler {
             return;
         };
 
+        // Serial execution has one open transaction at a time, so a conflict cannot happen in
+        // deterministic mode (audit S9). If one does, it is a bug: count it and abort the task
+        // instead of retrying after a random, wall-clock backoff (R9).
+        if self.is_manual() {
+            self.deterministic_conflicts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let conflict = conflict_info
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "details unavailable".to_string());
+            error!(
+                task_id,
+                boundary,
+                %conflict,
+                "Transaction conflict under the serial executor; aborting task"
+            );
+            lc.task_q.send_task_result_direct(
+                old_tc.registration,
+                old_tc.result_sender,
+                Err(TaskAbortedError),
+            );
+            return;
+        }
+
         // If the number of retries has been exceeded, abort immediately
         let max_retries = self.server_options.load().max_task_retries;
         if task.retries >= max_retries {

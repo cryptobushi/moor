@@ -20,7 +20,8 @@ use moor_common::threading::{
     pin_current_thread_to_core, set_current_task_worker_index, set_task_worker_count,
     unpin_current_thread,
 };
-use std::{io, thread::JoinHandle};
+use parking_lot::Mutex;
+use std::{collections::VecDeque, io, sync::Arc, thread::JoinHandle};
 use tracing::{error, info, warn};
 
 trait WorkItem {
@@ -41,10 +42,39 @@ enum WorkerMsg {
     Stop,
 }
 
-/// Fixed-size task worker pool with explicit worker lifecycle and affinity setup.
+type ManualJob = Box<dyn FnOnce() + Send + 'static>;
+
+/// The driver-owned run queue of the manual executor (deterministic mode). Dispatch appends a job;
+/// the block driver pops and runs jobs one at a time on its own thread, in FIFO order.
+#[derive(Clone, Default)]
+pub(crate) struct ManualRunQueue(Arc<Mutex<VecDeque<ManualJob>>>);
+
+impl ManualRunQueue {
+    fn push(&self, job: ManualJob) {
+        self.0.lock().push_back(job);
+    }
+
+    /// Run the oldest queued job on the calling thread. Returns false when the queue is empty.
+    /// The queue lock is released before the job runs, so the job may enqueue more work.
+    pub(crate) fn run_next(&self) -> bool {
+        let Some(job) = self.0.lock().pop_front() else {
+            return false;
+        };
+        job();
+        true
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.lock().is_empty()
+    }
+}
+
+/// Fixed-size task worker pool with explicit worker lifecycle and affinity setup, or (in
+/// deterministic mode) a manual run queue with no worker threads at all.
 pub(crate) struct TaskThreadPool {
     sender: Sender<WorkerMsg>,
     threads: Vec<JoinHandle<()>>,
+    manual: Option<ManualRunQueue>,
 }
 
 impl TaskThreadPool {
@@ -150,6 +180,7 @@ impl TaskThreadPool {
         let mut pool = Self {
             sender,
             threads: Vec::with_capacity(num_threads),
+            manual: None,
         };
         for index in 0..num_threads {
             let receiver = receiver.clone();
@@ -165,10 +196,29 @@ impl TaskThreadPool {
         Ok(pool)
     }
 
+    /// A pool with no threads: `spawn` appends to `queue`, which the block driver runs.
+    pub(crate) fn manual(queue: ManualRunQueue) -> Self {
+        let (sender, _) = flume::unbounded::<WorkerMsg>();
+        Self {
+            sender,
+            threads: Vec::new(),
+            manual: Some(queue),
+        }
+    }
+
+    /// True when this pool is the manual executor's run queue.
+    pub(crate) fn is_manual(&self) -> bool {
+        self.manual.is_some()
+    }
+
     pub(crate) fn spawn<F>(&self, task: F)
     where
         F: FnOnce() + Send + 'static,
     {
+        if let Some(queue) = &self.manual {
+            queue.push(Box::new(task));
+            return;
+        }
         let msg = WorkerMsg::Run(Box::new(task));
         if let Err(e) = self.sender.send(msg) {
             warn!(error = ?e, "Failed to enqueue task into task thread pool");
@@ -250,10 +300,7 @@ fn worker_loop(
 mod tests {
     use super::*;
     use std::{
-        sync::{
-            Arc,
-            atomic::{AtomicBool, Ordering},
-        },
+        sync::atomic::{AtomicBool, Ordering},
         time::Duration,
     };
 
@@ -277,6 +324,27 @@ mod tests {
         assert!(result.is_err());
         // This must already be true on return: dropping raw handles would detach.
         assert!(observed_stop.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn manual_pool_runs_jobs_in_submission_order_on_the_caller() {
+        let queue = ManualRunQueue::default();
+        let pool = TaskThreadPool::manual(queue.clone());
+        let order = Arc::new(Mutex::new(Vec::new()));
+        for i in 0..3 {
+            let order = order.clone();
+            let inner = queue.clone();
+            pool.spawn(move || {
+                order.lock().push(i);
+                if i == 0 {
+                    // Work queued by a running job goes to the back.
+                    let order = order.clone();
+                    inner.push(Box::new(move || order.lock().push(9)));
+                }
+            });
+        }
+        while queue.run_next() {}
+        assert_eq!(*order.lock(), [0, 1, 2, 9]);
     }
 
     #[test]

@@ -225,6 +225,17 @@ impl Scheduler {
                 let messages = lc.task_q.drain_messages(task_id);
                 WakeCondition::Immediate(Some(List::from_iter(messages).into()))
             }
+            // Maintenance completes on its own thread at a wall-clock moment; in deterministic
+            // mode a blocking wait for it fails at once, as when the job cannot start.
+            TaskSuspend::Checkpoint if self.is_manual() => {
+                WakeCondition::Immediate(Some(v_bool_int(false)))
+            }
+            TaskSuspend::StorageCompaction(_) if self.is_manual() => {
+                WakeCondition::Immediate(Some(compaction_failure_to_var(
+                    &[],
+                    &SchedulerError::CouldNotStartTask,
+                )))
+            }
             TaskSuspend::Checkpoint => match self.prepare_checkpoint_job() {
                 Ok(job) => {
                     let generation = job.generation();

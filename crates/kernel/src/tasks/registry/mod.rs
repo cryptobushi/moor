@@ -71,8 +71,14 @@ pub struct TaskQ {
 
 impl TaskQ {
     pub fn new(suspended: SuspensionQ) -> Self {
-        let live_tasks = suspended.live_tasks.clone();
         let thread_pool = TaskThreadPool::configured().expect("Failed to create task thread pool");
+        Self::with_thread_pool(suspended, thread_pool)
+    }
+
+    /// Build the task queue around a given pool (the manual executor's run queue in
+    /// deterministic mode).
+    pub(crate) fn with_thread_pool(suspended: SuspensionQ, thread_pool: TaskThreadPool) -> Self {
+        let live_tasks = suspended.live_tasks.clone();
 
         Self {
             active: Default::default(),

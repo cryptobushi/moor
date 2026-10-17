@@ -218,29 +218,23 @@ impl Scheduler {
     ) -> Result<SchedulerThreads, SchedulerError> {
         // Taking this receiver reserves the one allowed startup while state stays
         // Created. Other callers cannot enter restoration or admit work yet.
-        let client_request_recv = {
-            let lc = self.lifecycle.lock();
-            if lc.state != SchedulerState::Created {
-                return Err(SchedulerError::SchedulerNotResponding);
-            }
-            self.client_request_recv
-                .lock()
-                .take()
-                .ok_or(SchedulerError::CouldNotStartTask)?
-        };
+        let client_request_recv = self.take_client_request_recv()?;
         let mut startup = SchedulerStartup::new(self.clone());
-        {
-            let mut lc = self.lifecycle.lock();
-            if let Some(max_restored_task_id) =
-                lc.task_q.suspended.load_tasks(bg_session_factory.clone())
-            {
-                let next_restored_task_id = max_restored_task_id
-                    .checked_add(1)
-                    .expect("Restored task ID exhausted the task ID space");
-                lc.next_task_id = lc.next_task_id.max(next_restored_task_id);
-            }
-            lc.load_schedules();
-            lc.bg_session_factory = Some(bg_session_factory);
+        self.restore_tasks(bg_session_factory);
+
+        if self.manual_queue.is_some() {
+            // Deterministic mode: one sequencer thread replaces the request, timer and worker
+            // threads. It runs each client request, then the run queue to quiescence, before
+            // taking the next request, so arrival order at this channel is the sequence.
+            let scheduler = self.clone();
+            startup.spawn(
+                "moor-det-sequencer",
+                move || scheduler.sequencer_loop(client_request_recv),
+                &mut spawner,
+            )?;
+            let services = startup.finish();
+            info!("Scheduler started (deterministic mode, manual executor)");
+            return Ok(services);
         }
 
         if let Some(recv) = self.worker_response_recv.lock().take() {
@@ -270,6 +264,36 @@ impl Scheduler {
         let services = startup.finish();
         info!("Scheduler started");
         Ok(services)
+    }
+
+    /// Load persisted continuations and schedules and install the background session factory.
+    pub(super) fn restore_tasks(&self, bg_session_factory: Arc<dyn SessionFactory>) {
+        let mut lc = self.lifecycle.lock();
+        if let Some(max_restored_task_id) =
+            lc.task_q.suspended.load_tasks(bg_session_factory.clone())
+        {
+            let next_restored_task_id = max_restored_task_id
+                .checked_add(1)
+                .expect("Restored task ID exhausted the task ID space");
+            lc.next_task_id = lc.next_task_id.max(next_restored_task_id);
+        }
+        lc.load_schedules();
+        lc.bg_session_factory = Some(bg_session_factory);
+    }
+
+    /// Take the client request receiver while the scheduler is still `Created`. Taking it
+    /// reserves the one allowed startup.
+    pub(super) fn take_client_request_recv(
+        &self,
+    ) -> Result<Receiver<SchedulerClientRequest>, SchedulerError> {
+        let lc = self.lifecycle.lock();
+        if lc.state != SchedulerState::Created {
+            return Err(SchedulerError::SchedulerNotResponding);
+        }
+        self.client_request_recv
+            .lock()
+            .take()
+            .ok_or(SchedulerError::CouldNotStartTask)
     }
 
     fn client_request_loop(&self, recv: Receiver<SchedulerClientRequest>) {

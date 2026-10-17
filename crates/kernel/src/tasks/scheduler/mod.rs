@@ -31,6 +31,7 @@ pub(crate) mod effects;
 pub(crate) mod gc;
 pub(crate) mod lifecycle;
 mod maintenance;
+pub(crate) mod manual;
 mod requests;
 mod schedules;
 mod services;
@@ -48,6 +49,7 @@ use crate::{
         maintenance::MaintenanceCoordinator,
         registry::{LiveTaskRegistry, SuspensionQ, TaskQ},
         schedule_q::ScheduleQ,
+        task_pool::{ManualRunQueue, TaskThreadPool},
         tasks_db::TasksDb,
         workers::{WorkerRequest, WorkerResponse},
     },
@@ -63,7 +65,10 @@ use moor_db::Database;
 use moor_var::{Error, Var};
 use parking_lot::{Condvar, Mutex};
 pub use services::SchedulerThreads;
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, atomic::AtomicU64},
+    time::Duration,
+};
 
 pub(crate) type SchedulerClientRequest = Box<dyn FnOnce(&Scheduler) + Send + 'static>;
 
@@ -121,6 +126,14 @@ pub struct Scheduler {
 
     /// Condvar to wake the timer thread when a new earlier timer is inserted.
     timer_notify: Arc<(Mutex<bool>, Condvar)>,
+
+    /// Deterministic mode only: the manual executor's run queue. Present exactly when
+    /// `config.deterministic` is on. There is then no task pool, timer or worker thread.
+    pub(crate) manual_queue: Option<ManualRunQueue>,
+
+    /// Deterministic mode only: transaction conflicts seen. Serial execution makes these
+    /// impossible; a non-zero count is a bug, and each one aborted its task.
+    pub(crate) deterministic_conflicts: Arc<AtomicU64>,
 }
 
 impl Scheduler {
@@ -152,7 +165,21 @@ impl Scheduler {
         moor_common::util::set_perf_timing_policy(timing_policy);
 
         let suspension_q = SuspensionQ::new(tasks_database);
-        let task_q = TaskQ::new(suspension_q);
+        // Deterministic mode runs on the manual executor: one driver-owned run queue and no task
+        // pool threads (audit S1). Workers are off too (audit E1): their results are outside the
+        // block, so worker requests abort.
+        let manual_queue = config.deterministic.is_on().then(ManualRunQueue::default);
+        let (worker_request_send, worker_request_recv) = if manual_queue.is_some() {
+            (None, None)
+        } else {
+            (worker_request_send, worker_request_recv)
+        };
+        let task_q = match &manual_queue {
+            Some(queue) => {
+                TaskQ::with_thread_pool(suspension_q, TaskThreadPool::manual(queue.clone()))
+            }
+            None => TaskQ::new(suspension_q),
+        };
         let live_tasks = task_q.live_tasks.clone();
         let default_server_options = ServerOptions {
             bg_seconds: DEFAULT_BG_SECONDS,
@@ -210,6 +237,8 @@ impl Scheduler {
             client_request_send,
             client_request_recv: Arc::new(Mutex::new(Some(client_request_recv))),
             timer_notify: Arc::new((Mutex::new(false), Condvar::new())),
+            manual_queue,
+            deterministic_conflicts: Arc::new(AtomicU64::new(0)),
         };
 
         s.reload_server_options();

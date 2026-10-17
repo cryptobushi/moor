@@ -65,6 +65,7 @@ pub type BatchResultSink = std::sync::Arc<
     std::sync::Mutex<Option<Result<Vec<world_state_action::WorldStateResult>, SchedulerError>>>,
 >;
 
+pub mod block_driver;
 pub mod scheduler;
 
 pub(crate) mod checkpoint;
