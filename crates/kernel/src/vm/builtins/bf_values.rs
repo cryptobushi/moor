@@ -625,7 +625,7 @@ fn bf_uuid(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
     match bf_args.args.len() {
         0 => {
             // Generate a new v7 UUID
-            let uuid = Uuid::now_v7();
+            let uuid = moor_common::util::det::uuid_v7();
             Ok(Ret(v_str(uuid.to_string().as_str())))
         }
         2 => {
