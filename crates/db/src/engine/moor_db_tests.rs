@@ -5669,4 +5669,87 @@ mod tests {
             );
         }
     }
+
+    /// S0-3 perf probe: `cargo test --release -p moor-db perf_room_of_10k -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn perf_room_of_10k() {
+        use crate::api::world_state::DbWorldState;
+        use moor_common::matching::{ComplexObjectNameMatcher, ObjectNameMatcher, WsMatchEnv};
+        use std::time::Instant;
+        const N: usize = 10_000;
+        const REPS: u32 = 20;
+        let db = test_db();
+        let mut tx = db.start_transaction();
+        let mk = |tx: &mut crate::engine::moor_db::WorldStateTransaction, owner, loc, name: &str| {
+            tx.create_object(
+                ObjectKind::NextObjid,
+                ObjAttrs::new(owner, NOTHING, loc, BitEnum::new_with(ObjFlag::Read), name),
+            )
+            .unwrap()
+        };
+        let room = mk(&mut tx, NOTHING, NOTHING, "room");
+        let player = mk(&mut tx, NOTHING, room, "player");
+        let things: Vec<Obj> = (0..N).map(|_| mk(&mut tx, player, room, "sword")).collect();
+        assert!(matches!(tx.commit().unwrap(), CommitResult::Success { .. }));
+        let report = |label: &str, total: std::time::Duration, reps: u32| {
+            println!("PERF {label}: {:.1} us", total.as_secs_f64() * 1e6 / reps as f64);
+        };
+
+        let mut total = std::time::Duration::ZERO;
+        for _ in 0..REPS {
+            let tx = db.start_transaction();
+            let t = Instant::now();
+            let c = tx.get_object_contents(&room).unwrap();
+            total += t.elapsed();
+            assert_eq!(c.len(), N + 1);
+        }
+        report("contents() read, 10k, committed", total, REPS);
+
+        // Move out and back in, inside one transaction (no commit), then with commit.
+        let mut total = std::time::Duration::ZERO;
+        for r in 0..REPS as usize {
+            let mut tx = db.start_transaction();
+            let t = Instant::now();
+            tx.set_object_location(&things[r * 37], &NOTHING).unwrap();
+            tx.set_object_location(&things[r * 37], &room).unwrap();
+            total += t.elapsed();
+        }
+        report("move out+in, in-tx (no commit)", total, REPS);
+        let mut total = std::time::Duration::ZERO;
+        for r in 0..REPS as usize {
+            let mut tx = db.start_transaction();
+            let t = Instant::now();
+            tx.set_object_location(&things[r * 41], &NOTHING).unwrap();
+            tx.set_object_location(&things[r * 41], &room).unwrap();
+            assert!(matches!(tx.commit().unwrap(), CommitResult::Success { .. }));
+            total += t.elapsed();
+        }
+        report("move out+in, with commit", total, REPS);
+
+        let mut total = std::time::Duration::ZERO;
+        for _ in 0..REPS as usize {
+            let mut tx = db.start_transaction();
+            tx.set_object_location(&things[5], &NOTHING).unwrap();
+            tx.set_object_location(&things[5], &room).unwrap();
+            let t = Instant::now();
+            let c = tx.get_object_contents(&room).unwrap();
+            total += t.elapsed();
+            assert_eq!(c.len(), N + 1);
+        }
+        report("contents() read after local move, 10k", total, REPS);
+
+        let mut total = std::time::Duration::ZERO;
+        for _ in 0..REPS {
+            let tx = db.start_transaction();
+            let ws = DbWorldState { tx };
+            let env = WsMatchEnv::new(&ws, player);
+            let m = ComplexObjectNameMatcher { env, player, fuzzy_threshold: 0.0 };
+            let t = Instant::now();
+            let r = m.match_object("5000th sword");
+            total += t.elapsed();
+            assert_eq!(r.unwrap().result, Some(things[4999]));
+        }
+        report("ordinal match '5000th sword', 10k", total, REPS);
+    }
 }
