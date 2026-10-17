@@ -145,6 +145,14 @@ where
     table.insert_guaranteed_unique(d, c)
 }
 
+/// Build an `ObjSet` in ascending object-id order, whatever order `objs` arrives in. Used where the
+/// source is a hash-ordered scan (H1: results must not depend on the per-process hash seed).
+fn sorted_objset(objs: impl Iterator<Item = Obj>) -> ObjSet {
+    let mut v: Vec<Obj> = objs.collect();
+    v.sort_unstable();
+    ObjSet::from_iter(v)
+}
+
 impl WorldStateTransaction {
     pub fn object_valid(&self, obj: &Obj) -> Result<bool, WorldStateError> {
         match self.object_flags.has_domain(obj) {
@@ -244,7 +252,7 @@ impl WorldStateTransaction {
             .object_flags
             .scan(&|_, _| true)
             .map_err(|e| WorldStateError::DatabaseError(format!("Error getting objects: {e:?}")))?;
-        Ok(ObjSet::from_iter(objects.iter().map(|(k, _)| *k)))
+        Ok(sorted_objset(objects.iter().map(|(k, _)| *k)))
     }
 
     pub fn get_object_flags(&self, obj: &Obj) -> Result<BitEnum<ObjFlag>, WorldStateError> {
@@ -259,7 +267,8 @@ impl WorldStateTransaction {
             .object_flags
             .scan(&|_, flags| flags.contains(ObjFlag::User))
             .map_err(|e| WorldStateError::DatabaseError(format!("Error getting players: {e:?}")))?;
-        Ok(ObjSet::from_iter(players.iter().map(|(k, _)| *k)))
+        // The flags relation is a hash map scanned in hash order, so order the result here.
+        Ok(sorted_objset(players.iter().map(|(k, _)| *k)))
     }
 
     pub fn get_max_object(&self) -> Result<Obj, WorldStateError> {
@@ -695,7 +704,9 @@ impl WorldStateTransaction {
             let objects = self.object_flags.scan(&|_, _| true).map_err(|e| {
                 WorldStateError::DatabaseError(format!("Error scanning objects: {e:?}"))
             })?;
-            objects.into_iter().map(|(obj, _)| obj).collect()
+            let mut all: Vec<Obj> = objects.into_iter().map(|(obj, _)| obj).collect();
+            all.sort_unstable();
+            all
         };
 
         // Apply remaining filters via point lookups.

@@ -995,4 +995,91 @@ mod tests {
                 .guaranteed_unique
         );
     }
+
+    /// Fisher-Yates with a fixed xorshift stream, so failures reproduce without a rand dependency.
+    fn shuffled(mut items: Vec<u64>, mut state: u64) -> Vec<u64> {
+        for i in (1..items.len()).rev() {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            items.swap(i, (state % (i as u64 + 1)) as usize);
+        }
+        items
+    }
+
+    /// H1: reverse lookups are ascending by domain whatever the insertion order, both for committed
+    /// state and for a transaction that has local inserts, moves and deletes layered on top.
+    #[test]
+    fn reverse_lookup_is_ordered_for_any_insertion_order() {
+        let a = TestCodomain(1);
+        let b = TestCodomain(2);
+        for seed in 1..=40u64 {
+            let provider = TestProvider {
+                data: Arc::new(Mutex::new(HashMap::new())),
+            };
+            let relation = Arc::new(Relation::new_with_secondary(
+                Symbol::mk("test"),
+                Arc::new(provider),
+            ));
+
+            // Committed: 0..200 even ids into `a`, odd ids into `b`, in shuffled order.
+            let tx1 = Tx {
+                ts: Timestamp(10),
+                visible_ts: Timestamp(10),
+                snapshot_version: 0,
+            };
+            let mut t1 = relation.clone().start(&tx1);
+            for id in shuffled((0..200).collect(), seed) {
+                let c = if id % 2 == 0 { &a } else { &b };
+                t1.insert(TestDomain(id), c.clone()).unwrap();
+            }
+            let in_a: Vec<_> = (0..200).filter(|i| i % 2 == 0).map(TestDomain).collect();
+            assert_eq!(t1.get_by_codomain(&a), in_a, "local view, seed {seed}");
+            let mut ws = t1.working_set().unwrap();
+            let mut cr = relation.begin_check();
+            cr.check(&mut ws).unwrap();
+            cr.apply(ws).unwrap();
+            cr.commit(relation.index());
+
+            // New transaction: move some odd ids into `a`, delete some, add fresh ids (interleaved
+            // with and beyond the base range), all in shuffled order.
+            let tx2 = Tx {
+                ts: Timestamp(20),
+                visible_ts: Timestamp(20),
+                snapshot_version: 0,
+            };
+            let mut t2 = relation.clone().start(&tx2);
+            let mut expected: std::collections::BTreeSet<u64> =
+                (0..200).filter(|i| i % 2 == 0).collect();
+            for id in shuffled((0..60).map(|i| i * 3 + 1).collect(), seed + 1000) {
+                match id % 4 {
+                    // odd, currently in b: move to a
+                    1 | 3 if id < 200 => {
+                        t2.update(&TestDomain(id), a.clone()).unwrap();
+                        expected.insert(id);
+                    }
+                    // even, currently in a: delete
+                    0 if id < 200 => {
+                        t2.delete(&TestDomain(id)).unwrap();
+                        expected.remove(&id);
+                    }
+                    // even, currently in a: move to b
+                    2 if id < 200 => {
+                        t2.update(&TestDomain(id), b.clone()).unwrap();
+                        expected.remove(&id);
+                    }
+                    _ => {
+                        t2.insert(TestDomain(id), a.clone()).unwrap();
+                        expected.insert(id);
+                    }
+                }
+            }
+            let got: Vec<u64> = t2.get_by_codomain(&a).into_iter().map(|d| d.0).collect();
+            assert_eq!(
+                got,
+                expected.into_iter().collect::<Vec<_>>(),
+                "tx-local overlay, seed {seed}"
+            );
+        }
+    }
 }

@@ -11,7 +11,7 @@
 // You should have received a copy of the GNU Affero General Public License along
 // with this program. If not, see <https://www.gnu.org/licenses/>.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 
 use crate::model::{ObjSet, ObjectRef, ValSet, WorldStateError};
 use moor_var::{NOTHING, Obj};
@@ -27,7 +27,7 @@ pub const MOCK_THING3: Obj = Obj::mk_id(6);
 
 pub struct MockObject {
     pub location: Obj,
-    pub contents: HashSet<Obj>,
+    pub contents: BTreeSet<Obj>,
     pub names: Vec<String>,
 }
 

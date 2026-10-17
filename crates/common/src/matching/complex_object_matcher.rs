@@ -275,17 +275,8 @@ mod tests {
             player: MOCK_PLAYER,
             fuzzy_threshold: 0.5,
         };
-        // The mock environment stores room contents in a HashSet. Ordinals follow
-        // its traversal order, so capture that order before matching.
-        let ordered: Vec<_> = matcher
-            .env
-            .get_surroundings(&MOCK_PLAYER)
-            .unwrap()
-            .iter()
-            .filter(|oid| *oid == MOCK_THING1 || *oid == MOCK_THING2)
-            .collect();
-        assert_eq!(ordered.len(), 2);
-        for (query, expected) in [("first t", ordered[0]), ("second t", ordered[1])] {
+        // Contents are id-ordered, so ordinals are a fixed function of the object ids.
+        for (query, expected) in [("first t", MOCK_THING1), ("second t", MOCK_THING2)] {
             let result = matcher.match_object(query).unwrap();
             assert_eq!(result.result, Some(expected));
             assert!(result.candidates.is_empty());

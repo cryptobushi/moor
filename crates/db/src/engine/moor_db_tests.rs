@@ -5570,4 +5570,103 @@ mod tests {
             .collect();
         assert!(results.is_empty());
     }
+
+    fn shuffled_indices(n: usize, mut state: u64) -> Vec<usize> {
+        let mut v: Vec<usize> = (0..n).collect();
+        for i in (1..n).rev() {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            v.swap(i, (state % (i as u64 + 1)) as usize);
+        }
+        v
+    }
+
+    fn assert_ascending(set: &ObjSet, what: &str) {
+        let got: Vec<Obj> = set.iter().collect();
+        let mut sorted = got.clone();
+        sorted.sort();
+        assert_eq!(got, sorted, "{what} not in object-id order");
+    }
+
+    /// H1: contents, children and players come back in ascending object-id order, however and in
+    /// whichever transaction the relations were built up.
+    #[test]
+    fn contents_children_players_are_id_ordered_for_any_insertion_order() {
+        for seed in 1..=10u64 {
+            let db = test_db();
+            let mut tx = db.start_transaction();
+            let mk = |tx: &mut crate::engine::moor_db::WorldStateTransaction| {
+                tx.create_object(
+                    ObjectKind::NextObjid,
+                    ObjAttrs::new(NOTHING, NOTHING, NOTHING, BitEnum::new(), "x"),
+                )
+                .unwrap()
+            };
+            let room = mk(&mut tx);
+            let parent = mk(&mut tx);
+            let things: Vec<Obj> = (0..48).map(|_| mk(&mut tx)).collect();
+            // First half in this transaction, in shuffled order.
+            let order = shuffled_indices(things.len(), seed);
+            for &i in &order[..24] {
+                tx.set_object_location(&things[i], &room).unwrap();
+                tx.set_object_parent(&things[i], &parent).unwrap();
+                tx.set_object_flags(&things[i], BitEnum::new_with(ObjFlag::User))
+                    .unwrap();
+            }
+            assert_ascending(
+                &tx.get_object_contents(&room).unwrap(),
+                "uncommitted contents",
+            );
+            assert!(matches!(tx.commit().unwrap(), CommitResult::Success { .. }));
+
+            // Second half in a later transaction (layered over committed state), with some moves
+            // out and back in.
+            let mut tx = db.start_transaction();
+            for &i in &order[24..] {
+                tx.set_object_location(&things[i], &room).unwrap();
+                tx.set_object_parent(&things[i], &parent).unwrap();
+                tx.set_object_flags(&things[i], BitEnum::new_with(ObjFlag::User))
+                    .unwrap();
+            }
+            for &i in order.iter().step_by(5) {
+                tx.set_object_location(&things[i], &NOTHING).unwrap();
+                tx.set_object_location(&things[i], &room).unwrap();
+            }
+            let contents = tx.get_object_contents(&room).unwrap();
+            assert_eq!(contents.len(), things.len());
+            assert_ascending(&contents, "layered contents");
+            assert_ascending(
+                &tx.get_object_children(&parent).unwrap(),
+                "layered children",
+            );
+            assert_ascending(&tx.get_players().unwrap(), "players");
+            assert!(matches!(tx.commit().unwrap(), CommitResult::Success { .. }));
+
+            let tx = db.start_transaction();
+            let expected: Vec<Obj> = {
+                let mut v = things.clone();
+                v.sort();
+                v
+            };
+            assert_eq!(
+                tx.get_object_contents(&room)
+                    .unwrap()
+                    .iter()
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            assert_eq!(
+                tx.get_object_children(&parent)
+                    .unwrap()
+                    .iter()
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            assert_eq!(
+                tx.get_players().unwrap().iter().collect::<Vec<_>>(),
+                expected
+            );
+        }
+    }
 }
