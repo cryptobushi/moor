@@ -19,6 +19,7 @@ use moor_db::DatabaseConfig;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
+pub use moor_common::deterministic::{BlockContext, DeterministicMode};
 pub use moor_vm::FeaturesConfig;
 
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]
@@ -28,6 +29,9 @@ pub struct Config {
     pub features: Arc<FeaturesConfig>,
     pub import_export: ImportExportConfig,
     pub runtime: RuntimeConfig,
+    /// Deterministic mode (state transition function). Separate from any development shortcut.
+    #[serde(default)]
+    pub deterministic: DeterministicMode,
 }
 
 /// Configuration for runtime/scheduler behavior

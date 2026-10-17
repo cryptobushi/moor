@@ -34,7 +34,7 @@ use moor_daemon::{
 };
 use moor_db::DatabaseConfig;
 use moor_kernel::config::{
-    Config, FeaturesConfig, ImportExportConfig, ImportFormat, RuntimeConfig,
+    Config, DeterministicMode, FeaturesConfig, ImportExportConfig, ImportFormat, RuntimeConfig,
 };
 use moor_runtime_api::{api::HostServices, load_keypair};
 use moor_telnet_host::{HostRuntime as TelnetHostRuntime, TelnetHostConfig, TelnetProtocolConfig};
@@ -241,6 +241,7 @@ struct CombinedConfig {
     features: Arc<FeaturesConfig>,
     import_export: ImportExportConfig,
     runtime: RuntimeConfig,
+    deterministic: DeterministicMode,
     services: ServicesConfig,
 }
 
@@ -252,6 +253,7 @@ impl Default for CombinedConfig {
             features: config.features,
             import_export: config.import_export,
             runtime: config.runtime,
+            deterministic: config.deterministic,
             services: ServicesConfig::default(),
         }
     }
@@ -267,6 +269,7 @@ impl CombinedConfig {
             features: Arc::new(features),
             import_export: self.import_export,
             runtime: self.runtime,
+            deterministic: self.deterministic,
         };
 
         (Arc::new(config), self.services)

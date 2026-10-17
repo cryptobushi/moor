@@ -133,6 +133,8 @@ impl Scheduler {
         worker_request_send: Option<Sender<WorkerRequest>>,
         worker_request_recv: Option<Receiver<WorkerResponse>>,
     ) -> Self {
+        moor_common::deterministic::configure(&config.deterministic);
+
         let mut affinity_config = TaskPoolAffinityConfig::default();
         if let Some(pinning_mode) = config.runtime.task_pool_pinning {
             affinity_config.pinning_mode = pinning_mode;
