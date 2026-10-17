@@ -19,7 +19,7 @@ mod testrun;
 
 use crate::{feature_args::FeatureArgs, testrun::run_test};
 use clap::Parser;
-use clap_derive::Parser;
+use clap_derive::{Parser, Subcommand, ValueEnum};
 use eyre::{bail, eyre};
 use moor_common::{
     build,
@@ -181,6 +181,109 @@ pub struct Args {
         help = "Arguments to pass to test verbs, as a MOO literal (e.g., '{300}' or '300' for a single value)"
     )]
     test_args: Option<String>,
+
+    /// Load in deterministic mode (genesis block context: height 0), so verb and property
+    /// definition ids derive from the block as they do under the sequencer. Needed for a state root
+    /// that matches a deterministic replay of the same genesis.
+    #[arg(long)]
+    deterministic: bool,
+
+    #[command(subcommand)]
+    command: Option<StateCommand>,
+}
+
+/// Commands run against the loaded (or opened) database instead of the dump and test phases.
+#[derive(Subcommand, Debug)]
+enum StateCommand {
+    /// Print the state root (state encoding v1) and the per-relation hashes that feed it.
+    StateRoot {
+        /// Print JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print the canonical encoding of one relation (see `state-root` for the names).
+    StateDump {
+        #[arg(long)]
+        relation: String,
+        #[arg(long, value_enum, default_value_t = DumpFormat::Diag)]
+        format: DumpFormat,
+        /// In `diag` format, print long byte strings (programs) in full instead of by digest.
+        #[arg(long)]
+        full: bool,
+    },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum DumpFormat {
+    /// One `key => value` line per entry, RFC 8949 diagnostic notation, canonical order.
+    Diag,
+    /// The canonical CBOR bytes, hex encoded.
+    Hex,
+    /// The canonical CBOR bytes.
+    Cbor,
+}
+
+fn run_state_command(database: &TxDB, command: &StateCommand) -> Result<(), eyre::Report> {
+    use std::io::Write as _;
+    match command {
+        StateCommand::StateRoot { json } => {
+            let root = database
+                .state_root()
+                .map_err(|e| eyre!("state root: {e}"))?;
+            if *json {
+                let relations = root
+                    .relations
+                    .iter()
+                    .map(|r| {
+                        format!(
+                            "{{\"name\":\"{}\",\"hash\":\"{}\",\"entries\":{}}}",
+                            r.name,
+                            moor_db::state_root::hex(&r.hash),
+                            r.entries
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                println!(
+                    "{{\"version\":{},\"state_root\":\"{}\",\"relations\":[{relations}]}}",
+                    moor_db::state_root::STATE_VERSION,
+                    root.root_hex()
+                );
+            } else {
+                println!("state_root {}", root.root_hex());
+                for r in &root.relations {
+                    println!(
+                        "{:<26} {} {:>8}",
+                        r.name,
+                        moor_db::state_root::hex(&r.hash),
+                        r.entries
+                    );
+                }
+            }
+        }
+        StateCommand::StateDump {
+            relation,
+            format,
+            full,
+        } => {
+            let dump = database
+                .canonical_relation(relation)
+                .map_err(|e| eyre!("dump {relation}: {e}"))?;
+            match format {
+                DumpFormat::Diag => {
+                    for line in dump
+                        .diagnostic_lines(!full)
+                        .map_err(|e| eyre!("dump {relation}: {e}"))?
+                    {
+                        println!("{line}");
+                    }
+                }
+                DumpFormat::Hex => println!("{}", moor_db::state_root::hex(&dump.encode())),
+                DumpFormat::Cbor => io::stdout().write_all(&dump.encode())?,
+            }
+        }
+    }
+    Ok(())
 }
 
 fn emit_objdef_compile_error(
@@ -358,8 +461,11 @@ fn main() -> Result<(), eyre::Report> {
         error!("Cannot specify both src-objdef-dir and src-textdump");
         std::process::exit(1);
     }
-    if args.src_objdef_dir.is_none() && args.src_textdump.is_none() {
-        error!("Must specify either src-objdef_dir or src-textdump");
+    let open_only = args.command.is_some() && args.db_path.is_some();
+    if args.src_objdef_dir.is_none() && args.src_textdump.is_none() && !open_only {
+        error!(
+            "Must specify either src-objdef_dir or src-textdump (or --db-path with a state command)"
+        );
         std::process::exit(1);
     }
 
@@ -391,6 +497,9 @@ fn main() -> Result<(), eyre::Report> {
         _temp_dir_guard.path()
     };
 
+    if args.deterministic {
+        moor_common::deterministic::configure(&moor_common::deterministic::DeterministicMode::on());
+    }
     let (database, _) = TxDB::try_open(Some(db_path), DatabaseConfig::default())
         .map_err(|e| eyre::eyre!("Unable to open database at {}: {e}", db_path.display()))?;
     let mut loader_interface = match database.loader_client() {
@@ -490,6 +599,12 @@ fn main() -> Result<(), eyre::Report> {
         } else {
             info!("Object loader requested rollback (dry-run).")
         }
+    }
+
+    if let Some(command) = &args.command {
+        run_state_command(&database, command)?;
+        drop(database);
+        return Ok(());
     }
 
     info!(
