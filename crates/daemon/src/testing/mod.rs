@@ -37,3 +37,6 @@ mod disconnect_test;
 
 #[cfg(test)]
 mod property_update_test;
+
+#[cfg(test)]
+mod deterministic_rpc_test;

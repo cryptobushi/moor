@@ -23,6 +23,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   PASETO-local builtins and the environment and telemetry builtins raise `E_PERM`. The new
   `block_context()` builtin returns the height, time and command index. The mode is off by default.
 
+- In deterministic mode the daemon accepts state changes only as signed envelopes. A signed
+  `connect` (`VerifiedOAuthLogin` with `signed_connect`) mints the auth token; other envelopes
+  arrive as `ClientData` in the `runeworld`/`envelope` namespace. `Eval`, `InvokeVerb`, `Program`,
+  `UpdateProperty`, capture-mode invocations and other unsigned writes return permission denied,
+  unless the daemon runs with `--dev-unsigned-rpc`. `--dev-identity <keyfile>` allows password
+  login and unsigned commands for local development. Either flag makes the daemon non-publishing.
+  Disconnects run only `player:disfunc()`.
+
 - Term matching and query builtins accept a `case_sensitive` option. It preserves string case in
   matches, repeated bindings, and duplicate removal. Existing calls keep their current behavior.
 

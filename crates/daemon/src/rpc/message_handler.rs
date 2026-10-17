@@ -186,6 +186,9 @@ pub struct RpcMessageHandler {
     pub(crate) event_log: Arc<dyn EventLogOps>,
     pub(crate) transport: Arc<dyn Transport>,
     pub(crate) client_events: ClientEventBuffer,
+    /// Clients connected by a signed `connect`, with the player and session they used, so that
+    /// revoking a session boots them (deterministic mode).
+    pub(crate) signed_sessions: std::sync::Mutex<std::collections::HashMap<Uuid, (Obj, u32)>>,
 }
 
 impl RpcMessageHandler {
@@ -237,6 +240,7 @@ impl RpcMessageHandler {
             event_log,
             transport,
             client_events: ClientEventBuffer::new(),
+            signed_sessions: Default::default(),
         }
     }
 }
@@ -563,6 +567,14 @@ impl RpcMessageHandler {
         Ok(())
     }
 
+    /// Send one client a disconnect event and remove it.
+    pub(crate) fn boot_client(&self, client_id: Uuid) -> Result<(), Error> {
+        if let Err(e) = self.publish_client_event(client_id, ClientEvent::Disconnect) {
+            error!(error = ?e, client_id = ?client_id, "Unable to send disconnect event to client");
+        }
+        self.remove_client(client_id, None)
+    }
+
     /// Share removal and lifecycle delivery across detach, boot, and backlog eviction.
     pub(crate) fn remove_client(
         &self,
@@ -581,6 +593,10 @@ impl RpcMessageHandler {
         scheduler_client: Option<&SchedulerClient>,
     ) -> Result<(), Error> {
         self.client_events.remove_client(removed.client_id);
+        self.signed_sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&removed.client_id);
         if removed.disconnected_player.is_some() {
             let event = SessionActions::UserDisconnected(removed);
             if let Some(scheduler_client) = scheduler_client {

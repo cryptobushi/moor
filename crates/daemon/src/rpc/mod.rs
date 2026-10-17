@@ -23,6 +23,7 @@
 mod api_codec;
 mod client_event_buffer;
 mod daemon_api_impl;
+pub mod deterministic_gate;
 #[cfg(test)]
 pub mod hosts;
 #[cfg(not(test))]
@@ -32,6 +33,7 @@ pub mod message_handler;
 #[cfg(not(test))]
 mod message_handler;
 mod message_handler_auth;
+mod message_handler_envelope;
 mod message_handler_tasks;
 mod output_capture_session;
 mod server;

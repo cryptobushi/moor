@@ -32,6 +32,33 @@ pub struct Config {
     /// Deterministic mode (state transition function). Separate from any development shortcut.
     #[serde(default)]
     pub deterministic: DeterministicMode,
+    /// Development shortcuts that weaken deterministic mode's signed-input rule. A daemon with
+    /// any of them on is non-publishing: its inputs are not a valid log.
+    #[serde(default)]
+    pub dev: DevShortcuts,
+}
+
+/// Development shortcuts for deterministic mode (RuneWorld ADR 0005 decision 8). Off by default;
+/// each one makes the daemon non-publishing.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DevShortcuts {
+    /// Accept the PASETO-only state-changing RPCs (`Eval`, `InvokeVerb`, `Program`,
+    /// `UpdateProperty`, capture-mode invocations, and the rest of the gated list) without an
+    /// envelope.
+    pub unsigned_rpc: bool,
+    /// The Stage 0 identity shortcut: a session keyfile the developer's hosts auto-sign with.
+    /// With it set the daemon also accepts password login (`LoginCommand` with arguments, OAuth
+    /// logins), unsigned connected `Command`s and connecting `Attach`es.
+    pub identity: Option<PathBuf>,
+}
+
+impl DevShortcuts {
+    /// True when any shortcut is on, so the daemon must not publish batches.
+    #[must_use]
+    pub fn any(&self) -> bool {
+        self.unsigned_rpc || self.identity.is_some()
+    }
 }
 
 /// Configuration for runtime/scheduler behavior

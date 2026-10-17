@@ -37,6 +37,7 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use crate::connections::NewConnectionParams;
+use crate::rpc::deterministic_gate;
 use crate::rpc::message_handler::{
     BF_SYM, DB_SYM, DO_LOGIN_COMMAND, RpcMessageHandler, SCHED_SYM, bf_counter_entries,
     db_counter_entries, sched_counter_entries,
@@ -171,6 +172,14 @@ impl RuntimeApi for RpcMessageHandler {
         client_id: Uuid,
         request: ClientRequest,
     ) -> Result<ClientReply, RpcMessageError> {
+        // Deterministic mode: a PASETO authorises reads and event streams only (RuneWorld
+        // ADR 0005 decision 8). State changes must arrive as signed envelopes.
+        if self.config.deterministic.is_on()
+            && let Err(reason) = deterministic_gate::check(&request, &self.config.dev)
+        {
+            warn!(%client_id, "{reason}");
+            return Err(RpcMessageError::PermissionDenied);
+        }
         match request {
             ClientRequest::EventStream {
                 client_token,
@@ -289,6 +298,23 @@ impl RuntimeApi for RpcMessageHandler {
                     None => SYSTEM_OBJECT,
                 };
                 self.request_sys_prop_typed(scheduler_client, player, object, property)
+            }
+
+            ClientRequest::VerifiedOAuthLogin {
+                client_token,
+                connect_args,
+                do_attach,
+            } if connect_args.first().map(String::as_str)
+                == Some(deterministic_gate::SIGNED_CONNECT) =>
+            {
+                let _ = do_attach;
+                let connection = self.client_auth(client_token, client_id)?;
+                let [_, hex] = connect_args.as_slice() else {
+                    return Err(RpcMessageError::InvalidRequest(
+                        "signed_connect takes one hex envelope".to_string(),
+                    ));
+                };
+                self.perform_signed_connect(scheduler_client, client_id, connection, hex)
             }
 
             ClientRequest::VerifiedOAuthLogin {
@@ -492,6 +518,22 @@ impl RuntimeApi for RpcMessageHandler {
                 Ok(ClientReply::TaskSubmitted {
                     task_id: task_handle.task_id() as u64,
                 })
+            }
+
+            ClientRequest::ClientData {
+                client_token,
+                namespace,
+                kind,
+                payload,
+                ..
+            } if self.config.deterministic.is_on()
+                && namespace.as_str() == deterministic_gate::ENVELOPE_NAMESPACE
+                && kind.as_str() == deterministic_gate::ENVELOPE_KIND =>
+            {
+                // The envelope is its own authority; the client token only identifies the
+                // connection its output goes to.
+                let connection = self.client_auth(client_token, client_id)?;
+                self.submit_signed_envelope(scheduler_client, client_id, connection, &payload)
             }
 
             ClientRequest::ClientData {

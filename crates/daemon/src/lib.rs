@@ -52,6 +52,7 @@ use sha2::{Digest, Sha256};
 mod allowed_hosts;
 pub mod connections;
 mod curve_keys;
+pub mod dev_identity;
 mod enrollment;
 mod event_log;
 mod rpc;
@@ -530,6 +531,24 @@ pub fn run(runtime_config: DaemonRuntimeConfig, runtime: DaemonRuntime) -> Resul
     // Deterministic mode runs the scheduler on the manual executor: workers are off (audit E1),
     // and every client request, host-side write included, goes through its single sequencer
     // thread (audit S4, S11).
+    if config.deterministic.is_on() {
+        if config.dev.any() {
+            warn!(
+                unsigned_rpc = config.dev.unsigned_rpc,
+                dev_identity = ?config.dev.identity,
+                "Deterministic mode with development shortcuts: this daemon is non-publishing; \
+                 its inputs are not a valid log"
+            );
+        }
+        if let Some(path) = &config.dev.identity {
+            let identity = dev_identity::load(path)?;
+            info!(
+                wallet = %identity.address(),
+                session_key = %identity.session_key_hex(),
+                "Development identity loaded; hosts auto-sign with this session key"
+            );
+        }
+    }
     let workers_enabled = if config.deterministic.is_on() && workers_enabled {
         info!("Deterministic mode: workers are disabled");
         false

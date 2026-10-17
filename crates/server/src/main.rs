@@ -279,6 +279,9 @@ impl CombinedConfig {
             import_export: self.import_export,
             runtime: self.runtime,
             deterministic: self.deterministic,
+            // The combined server exposes no development shortcuts: in deterministic mode its
+            // RPC gating is always on (use the daemon's --dev-* flags for local development).
+            dev: Default::default(),
         };
 
         (Arc::new(config), self.services)

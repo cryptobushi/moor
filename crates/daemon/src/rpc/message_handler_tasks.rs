@@ -67,6 +67,24 @@ impl RpcMessageHandler {
     ) -> Result<(), Error> {
         let session = Arc::new(self.new_rpc_session(client_id, *connection, *player));
 
+        // In deterministic mode a disconnect is an authority-free sequencer input that runs only
+        // `player:disfunc()` (RuneWorld ADR 0005 decision 6).
+        if self.config.deterministic.is_on() {
+            let _submitted = scheduler_client
+                .submit_disconnect(*player, session)
+                .with_context(|| "could not submit 'disfunc' task")?;
+            #[cfg(test)]
+            {
+                let (pending, ready) = &self.disconnect_tasks;
+                pending
+                    .lock()
+                    .map_err(|_| eyre::eyre!("disconnect task handles poisoned"))?
+                    .push(_submitted);
+                ready.notify_all();
+            }
+            return Ok(());
+        }
+
         let _submitted = scheduler_client
             .submit_verb_task(
                 player,

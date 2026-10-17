@@ -196,6 +196,24 @@ pub struct Args {
 
     #[arg(
         long,
+        help = "Deterministic mode, development only: accept the PASETO-only state-changing RPCs \
+                (Eval, InvokeVerb, Program, UpdateProperty, capture-mode invocations and the rest \
+                of the gated list) without a signed envelope. Makes the daemon non-publishing."
+    )]
+    pub dev_unsigned_rpc: bool,
+
+    #[arg(
+        long,
+        value_name = "KEYFILE",
+        help = "Deterministic mode, development only (Stage 0 identity shortcut): a JSON keyfile \
+                {wallet_secret, session_seed} that local hosts auto-sign envelopes with. Also \
+                accepts password login, unsigned connected commands and connecting attaches. \
+                Makes the daemon non-publishing. Separate from --dev-unsigned-rpc."
+    )]
+    pub dev_identity: Option<PathBuf>,
+
+    #[arg(
+        long,
         help = "Generate ED25519 keypair if it doesn't exist, then continue"
     )]
     pub generate_keypair: bool,
@@ -416,6 +434,12 @@ impl Args {
         // have set a genesis block, which is kept.
         if self.deterministic && !config.deterministic.is_on() {
             config.deterministic = DeterministicMode::on();
+        }
+        if self.dev_unsigned_rpc {
+            config.dev.unsigned_rpc = true;
+        }
+        if let Some(path) = &self.dev_identity {
+            config.dev.identity = Some(path.clone());
         }
         if let Some(args) = self.feature_args.as_ref() {
             let mut copy = config.features.as_ref().clone();
@@ -664,6 +688,33 @@ import_export:
 
         assert!(config.features.custom_errors);
         assert_eq!(config.import_export.import_format, ImportFormat::Textdump);
+    }
+
+    #[test]
+    fn dev_shortcuts_are_off_by_default() {
+        let args = Args::try_parse_from(["moor-daemon", "--deterministic"]).expect("parse args");
+
+        let config = args.load_config().expect("load config");
+
+        assert!(!config.dev.any());
+    }
+
+    #[test]
+    fn dev_flags_are_separate_switches() {
+        let args = Args::try_parse_from([
+            "moor-daemon",
+            "--deterministic",
+            "--dev-identity",
+            "dev-key.json",
+        ])
+        .expect("parse args");
+
+        let config = args.load_config().expect("load config");
+
+        assert_eq!(
+            (config.dev.unsigned_rpc, config.dev.identity.clone()),
+            (false, Some(std::path::PathBuf::from("dev-key.json")))
+        );
     }
 
     #[test]
