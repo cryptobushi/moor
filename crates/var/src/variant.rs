@@ -1853,12 +1853,8 @@ impl Var {
             (Variant::Flyweight(l), Variant::Flyweight(r)) => l.cmp(r),
             (Variant::Sym(l), Variant::Sym(r)) => l.cmp(&r),
             (Variant::Binary(l), Variant::Binary(r)) => l.cmp(r),
-            (Variant::Lambda(l), Variant::Lambda(r)) => {
-                use crate::program::program::PrgInner;
-                let l_ptr = &*l.0.body.0 as *const PrgInner;
-                let r_ptr = &*r.0.body.0 as *const PrgInner;
-                l_ptr.cmp(&r_ptr)
-            }
+            // Content order, never heap address (audit H3).
+            (Variant::Lambda(l), Variant::Lambda(r)) => l.canonical_cmp(r),
             (Variant::Int(l), Variant::Float(r)) => (l as f64).total_cmp(&r),
             (Variant::Float(l), Variant::Int(r)) => l.total_cmp(&(r as f64)),
             (Variant::None, _) => Ordering::Less,

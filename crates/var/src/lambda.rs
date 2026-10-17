@@ -15,6 +15,7 @@ use crate::{
     Var,
     program::{opcode::ScatterArgs, program::Program},
 };
+use std::cmp::Ordering;
 use triomphe::Arc;
 
 /// Lambda function value containing parameter specification, compiled body, and captured environment
@@ -63,4 +64,58 @@ impl Lambda {
             self_var: self.0.self_var,
         }))
     }
+}
+
+impl Lambda {
+    /// A total order over lambda values that depends only on their content: parameters, bytecode,
+    /// literals, variable names, nested lambdas and the captured environment. It never looks at an
+    /// address, so it is the same in every process (audit H3). Lambdas that compare `Equal` are
+    /// interchangeable for ordering purposes.
+    pub fn canonical_cmp(&self, other: &Self) -> Ordering {
+        if Arc::ptr_eq(&self.0, &other.0) {
+            return Ordering::Equal;
+        }
+        let (l, r) = (&*self.0, &*other.0);
+        l.params
+            .cmp(&r.params)
+            .then_with(|| program_cmp(&l.body, &r.body))
+            .then_with(|| l.captured_env.cmp(&r.captured_env))
+            .then_with(|| l.self_var.cmp(&r.self_var))
+    }
+}
+
+fn program_cmp(l: &Program, r: &Program) -> Ordering {
+    if Arc::ptr_eq(&l.0, &r.0) {
+        return Ordering::Equal;
+    }
+    // `Op` is only PartialOrd (it can carry floats); incomparable values are treated as equal,
+    // which falls through to the remaining fields.
+    let ops = l
+        .main_vector()
+        .partial_cmp(r.main_vector())
+        .unwrap_or(Ordering::Equal);
+    ops.then_with(|| l.literals().cmp(r.literals()))
+        .then_with(|| names_key(l).cmp(&names_key(r)))
+        .then_with(|| l.0.lambda_programs.len().cmp(&r.0.lambda_programs.len()))
+        .then_with(|| {
+            l.0.lambda_programs
+                .iter()
+                .zip(r.0.lambda_programs.iter())
+                .map(|(a, b)| program_cmp(a, b))
+                .find(|o| o.is_ne())
+                .unwrap_or(Ordering::Equal)
+        })
+}
+
+/// The program's variable declarations as a sorted, address-free key. `Names::decls` is a std
+/// `HashMap` with a per-process seed, so it must not be iterated in map order.
+fn names_key(p: &Program) -> Vec<(crate::program::names::Name, String)> {
+    let names = p.var_names();
+    let mut key: Vec<_> = names
+        .decls
+        .iter()
+        .map(|(n, d)| (*n, format!("{:?}", d.identifier.nr)))
+        .collect();
+    key.sort();
+    key
 }
