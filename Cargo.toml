@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "cores/tools/session-runner",
     "cores/tools/style-audit",
+    "crates/block",
     "crates/builtin-docs-macro",
     "crates/common",
     "crates/compiler",
@@ -31,6 +32,7 @@ members = [
 ]
 default-members = [
     "crates/var",
+    "crates/block",
     "crates/common",
     "crates/compiler",
     "crates/vm",
@@ -218,6 +220,7 @@ bytes = "1.10"
 byteview = "0.10"
 diffy = "0.5"
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
+zstd = { version = "0.13", default-features = false } # segment compression (RuneWorld ADR 0006)
 hostname = "0.4"
 micromeasure = "0.16"
 pastey = "0.2"
