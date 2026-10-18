@@ -70,6 +70,7 @@ pub mod block_events;
 pub mod envelope_admission;
 pub mod scheduler;
 pub mod sequencer;
+pub mod sequencer_recovery;
 
 pub(crate) mod checkpoint;
 pub mod convert_task;

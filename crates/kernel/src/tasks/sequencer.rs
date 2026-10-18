@@ -123,6 +123,20 @@ pub trait SequencerHooks: Send {
     ) -> Result<(), String> {
         Ok(())
     }
+    /// Group commit: `entries` are about to run as command indices `first_command_index`, ... of
+    /// block `height`. Journal them all and make them durable once. Defaults to `before_input`
+    /// per entry.
+    fn before_inputs(
+        &mut self,
+        height: u64,
+        first_command_index: u64,
+        entries: &[CommandEntry],
+    ) -> Result<(), String> {
+        entries
+            .iter()
+            .enumerate()
+            .try_for_each(|(i, e)| self.before_input(height, first_command_index + i as u64, e))
+    }
     /// The unsigned block is final; store it and record `(height, header_hash)` in the signing
     /// guard before the signature is made.
     fn before_sign(
@@ -189,6 +203,8 @@ struct OpenBlock {
     entries: Vec<CommandEntry>,
     /// Sum of the encoded entries (the batch adds its array head).
     entry_bytes: usize,
+    /// Inputs up to this command index are journalled already (group commit or recovery).
+    journalled: u64,
 }
 
 /// CBOR array head size for `n` entries.
@@ -388,6 +404,7 @@ impl Sequencer {
             ctx,
             entries: Vec::new(),
             entry_bytes: 0,
+            journalled: 0,
         });
         Ok(ctx)
     }
@@ -395,13 +412,50 @@ impl Sequencer {
     /// Whether `entry` fits the open block (false when none is open).
     #[must_use]
     pub fn fits(&self, entry: &CommandEntry) -> bool {
+        self.fitting(std::slice::from_ref(entry)) == 1
+    }
+
+    /// How many of `entries`, taken in order, fit the open block after its current inputs.
+    #[must_use]
+    pub fn fitting(&self, entries: &[CommandEntry]) -> usize {
         let Some(open) = &self.open else {
-            return false;
+            return 0;
         };
-        let n = open.entries.len() + 1;
-        n <= self.params.max_inputs
-            && array_head_len(n) + open.entry_bytes + entry.encode().len()
-                <= self.params.max_batch_bytes
+        let mut bytes = open.entry_bytes;
+        let mut n = open.entries.len();
+        for (i, entry) in entries.iter().enumerate() {
+            bytes += entry.encode().len();
+            n += 1;
+            if n > self.params.max_inputs || array_head_len(n) + bytes > self.params.max_batch_bytes
+            {
+                return i;
+            }
+        }
+        entries.len()
+    }
+
+    /// Group commit (ADR 0006 decision 4): journal the longest prefix of `entries` that fits the
+    /// open block as its next command indices, making them durable with one write, before any of
+    /// them runs. Returns how many were journalled; the caller then [`Self::submit`]s exactly
+    /// those, in order. Entries must pass [`CommandEntry::check`].
+    pub fn journal_inputs(&mut self, entries: &[CommandEntry]) -> Result<usize, SequencerError> {
+        let n = self.fitting(entries);
+        let open = self.open.as_mut().ok_or(SequencerError::NotOpen)?;
+        if open.journalled != open.entries.len() as u64 {
+            return Err(SequencerError::Hook(
+                "before_inputs",
+                "journalled inputs have not all run".into(),
+            ));
+        }
+        if n == 0 {
+            return Ok(0);
+        }
+        let first = open.entries.len() as u64 + 1;
+        self.hooks
+            .before_inputs(open.ctx.height, first, &entries[..n])
+            .map_err(|e| SequencerError::Hook("before_inputs", e))?;
+        open.journalled = first + n as u64 - 1;
+        Ok(n)
     }
 
     /// Run one input to quiescence as the next command of the open block. Its output goes to
@@ -423,9 +477,12 @@ impl Sequencer {
         let open = self.open.as_mut().ok_or(SequencerError::NotOpen)?;
         let height = open.ctx.height;
         let command_index = open.entries.len() as u64 + 1;
-        self.hooks
-            .before_input(height, command_index, &entry)
-            .map_err(|e| SequencerError::Hook("before_input", e))?;
+        if command_index > open.journalled {
+            self.hooks
+                .before_input(height, command_index, &entry)
+                .map_err(|e| SequencerError::Hook("before_input", e))?;
+            open.journalled = command_index;
+        }
         let events_before = self.driver.event_count();
         let entry_bytes = entry.encode().len();
         let outcome = match (&entry, block_input(&entry)) {
@@ -469,6 +526,22 @@ impl Sequencer {
             state_root,
         );
         debug_assert_eq!(header.seed, open.ctx.seed);
+        let mut sealed = self.sign_and_store(header, commands, events, started)?;
+        sealed.end_block_time = end_block_time;
+        sealed.abandoned = out.abandoned.len();
+        sealed.conflicts = out.conflicts;
+        Ok(sealed)
+    }
+
+    /// Seal steps after the header is final: `before_sign` (store the unsigned block, record it in
+    /// the signing guard), sign, check, `sealed` (store the signature), advance the tip.
+    fn sign_and_store(
+        &mut self,
+        header: BlockHeader,
+        commands: CommandBatch,
+        events: EventBatch,
+        started: Instant,
+    ) -> Result<Sealed, SequencerError> {
         self.hooks
             .before_sign(&header, &commands, &events)
             .map_err(|e| SequencerError::Hook("before_sign", e))?;
@@ -497,11 +570,79 @@ impl Sequencer {
             header_bytes: block.header.encode().len(),
             block,
             notice,
-            end_block_time,
+            end_block_time: Duration::ZERO,
             seal_time,
-            abandoned: out.abandoned.len(),
-            conflicts: out.conflicts,
+            abandoned: 0,
+            conflicts: 0,
         })
+    }
+
+    /// Crash recovery (ADR 0006 decision 4, recovery step 3): re-execute the block the journal
+    /// left open, under its recorded context and with its journalled inputs, and seal it. The
+    /// inputs are already durable, so they are not journalled again; their events go nowhere but
+    /// the batch (the hosts that saw them before the crash are gone).
+    pub fn reopen(
+        &mut self,
+        ctx: BlockContext,
+        inputs: Vec<CommandEntry>,
+    ) -> Result<Sealed, SequencerError> {
+        if self.open.is_some() {
+            return Err(SequencerError::AlreadyOpen);
+        }
+        let height = self.tip.height + 1;
+        if ctx.height != height {
+            return Err(FormatError::Height {
+                expected: height,
+                found: ctx.height,
+            }
+            .into());
+        }
+        if ctx.seed != seed_for(&self.tip.state_root, height) {
+            return Err(FormatError::Seed { height }.into());
+        }
+        if ctx.timestamp < self.tip.timestamp {
+            return Err(FormatError::TimestampDecreases { height }.into());
+        }
+        self.driver.begin_block(ctx);
+        self.open = Some(OpenBlock {
+            ctx,
+            entries: Vec::new(),
+            entry_bytes: 0,
+            journalled: inputs.len() as u64,
+        });
+        for entry in inputs {
+            let session: Arc<dyn Session> = Arc::new(NoopClientSession::new());
+            self.submit(entry, session, None)?;
+        }
+        self.seal()
+    }
+
+    /// Crash recovery when the database already holds the effects of a stored, unsigned block
+    /// (the crash came after `end_block`, before the signature was stored): finish its seal
+    /// without executing it again.
+    pub fn seal_stored(
+        &mut self,
+        header: BlockHeader,
+        commands: CommandBatch,
+        events: EventBatch,
+    ) -> Result<Sealed, SequencerError> {
+        if self.open.is_some() {
+            return Err(SequencerError::AlreadyOpen);
+        }
+        self.tip.check_next(&header)?;
+        let root = self
+            .driver
+            .state_root()
+            .map_err(|e| SequencerError::StateRoot(e.to_string()))?
+            .root;
+        if root != header.state_root {
+            return Err(SequencerError::StateRoot(format!(
+                "the database root {} is not block {}'s",
+                moor_block::hex(&root),
+                header.height
+            )));
+        }
+        self.sign_and_store(header, commands, events, Instant::now())
     }
 
     /// Stop the scheduler under the driver.

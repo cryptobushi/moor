@@ -49,13 +49,21 @@ pub struct Config {
 pub struct SequencerConfig {
     /// Run the block loop: one input queue, 1 s blocks, sealed and published.
     pub enabled: bool,
-    /// File holding the sequencer's secp256k1 secret as 64 hex digits (S1-2 replaces this with a
-    /// signing guard).
+    /// File holding the sequencer's secp256k1 secret as 64 hex digits.
     pub key_file: Option<PathBuf>,
+    /// The signing guard file (default: the key file's path with `.guard` appended). Its
+    /// exclusive lock is the key's lock: only the process holding it signs.
+    pub guard_file: Option<PathBuf>,
+    /// Directory of the sequencer's journal and local block store (default:
+    /// `<data-dir>/sequencer`).
+    pub state_dir: Option<PathBuf>,
     /// Directory of the `FileSink` the sealed blocks are published to.
     pub sink_dir: Option<PathBuf>,
     /// Blocks per published segment.
     pub segment_blocks: usize,
+    /// Stop opening blocks while more than this many sealed blocks are unpublished (ADR 0006:
+    /// 300). Lower only for tests.
+    pub max_da_lag: u64,
     /// Development identity only: the player the `--dev-identity` wallet is bound to at genesis.
     pub dev_player: Option<i32>,
 }
@@ -65,8 +73,11 @@ impl Default for SequencerConfig {
         Self {
             enabled: false,
             key_file: None,
+            guard_file: None,
+            state_dir: None,
             sink_dir: None,
             segment_blocks: 10,
+            max_da_lag: 300,
             dev_player: None,
         }
     }
