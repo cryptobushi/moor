@@ -284,14 +284,14 @@ impl Var {
         // MOO floating-point values are always real (finite) numbers:
         // infinities and NaNs are not representable.
         debug_assert!(f.is_finite(), "non-real float in MOO value");
-        Self::from_header_and_data(Self::header(TAG_FLOAT), f.to_bits())
+        Self::from_header_and_data(Self::header(TAG_FLOAT), canonical_float_bits(f))
     }
 
     /// Build a float without the finiteness check, so tests can exercise the handling of
     /// non-finite floats that release builds do not reject at construction.
     #[cfg(all(test, feature = "json"))]
     pub(crate) fn mk_float_unchecked(f: f64) -> Self {
-        Self::from_header_and_data(Self::header(TAG_FLOAT), f.to_bits())
+        Self::from_header_and_data(Self::header(TAG_FLOAT), canonical_float_bits(f))
     }
 
     #[inline(always)]
@@ -1743,6 +1743,15 @@ impl Debug for Var {
     }
 }
 
+/// The bits a MOO float is stored as. `-0.0` is folded into `0.0` here, at the single place every
+/// float enters a `Var`, so there is exactly one zero: the storage layer omits a float equal to its
+/// `0.0` default (which used to turn `-0.0` into `0.0` on reopen and change the state root), and
+/// `==`, `Hash` and `Ord` now agree on it. See RuneWorld `docs/spec/state-root-v0.md`.
+#[inline(always)]
+const fn canonical_float_bits(f: f64) -> u64 {
+    if f == 0.0 { 0 } else { f.to_bits() }
+}
+
 impl Hash for Var {
     fn hash<H: Hasher>(&self, state: &mut H) {
         match self.variant() {
@@ -2071,6 +2080,52 @@ pub fn v_empty_map() -> Var {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn float_bits(v: &Var) -> u64 {
+        match v.variant() {
+            Variant::Float(f) => f.to_bits(),
+            other => panic!("not a float: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn negative_zero_is_stored_as_positive_zero() {
+        assert_eq!(float_bits(&Var::mk_float(-0.0)), 0.0f64.to_bits());
+    }
+
+    #[test]
+    fn negative_zero_agrees_with_zero_on_eq_hash_and_ord() {
+        use std::hash::{DefaultHasher, Hash, Hasher};
+        let (neg, pos) = (Var::mk_float(-0.0), Var::mk_float(0.0));
+        let hash = |v: &Var| {
+            let mut h = DefaultHasher::new();
+            v.hash(&mut h);
+            h.finish()
+        };
+        assert_eq!(neg, pos);
+        assert_eq!(hash(&neg), hash(&pos));
+        assert_eq!(neg.cmp(&pos), Ordering::Equal);
+    }
+
+    #[test]
+    fn arithmetic_that_yields_negative_zero_is_canonical() {
+        assert_eq!(float_bits(&Var::mk_float(0.0 * -1.0)), 0);
+        assert_eq!(float_bits(&Var::mk_float((-0.5f64).ceil())), 0);
+    }
+
+    #[test]
+    fn subnormals_and_extremes_keep_their_bits() {
+        for f in [
+            f64::from_bits(1),
+            -f64::from_bits(1),
+            f64::MIN_POSITIVE,
+            -f64::MIN_POSITIVE / 2.0,
+            f64::MAX,
+            f64::MIN,
+        ] {
+            assert_eq!(float_bits(&Var::mk_float(f)), f.to_bits());
+        }
+    }
 
     #[test]
     fn test_size() {

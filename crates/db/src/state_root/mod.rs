@@ -702,6 +702,65 @@ mod tests {
         assert_eq!(db.state_root().unwrap(), before);
     }
 
+    /// Issue #54: a float equal to its FlatBuffer default (`0.0`) is not stored, which used to
+    /// turn `-0.0` into `0.0` on reopen. `-0.0` is now one zero at construction, so the root and
+    /// every canonical dump match across a restart, for the edge values alone and nested.
+    #[test]
+    fn float_edge_values_keep_root_and_dump_across_a_reopen() {
+        use moor_var::{List, v_float, v_flyweight, v_list, v_map};
+        let sub = v_float(f64::from_bits(1));
+        let edges = [
+            v_float(-0.0),
+            sub.clone(),
+            v_float(-f64::from_bits(1)),
+            v_float(f64::MIN_POSITIVE),
+            v_float(f64::MAX),
+            v_float(f64::MIN),
+            v_list(&[v_float(-0.0), v_list(&[v_float(-0.0), sub.clone()])]),
+            v_map(&[(v_str("k"), v_float(-0.0)), (v_float(-0.0), sub.clone())]),
+            v_flyweight(
+                Obj::mk_id(1),
+                &[(Symbol::mk("a"), v_float(-0.0))],
+                List::mk_list(&[v_float(-0.0)]),
+            ),
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        let (root, dumps) = {
+            let (db, _) = MoorDB::try_open(Some(dir.path()), DatabaseConfig::default()).unwrap();
+            let objs = create(&db, 1);
+            let mut tx = db.start_transaction();
+            for (i, value) in edges.iter().enumerate() {
+                tx.define_property(
+                    &objs[0],
+                    &objs[0],
+                    Symbol::mk(&format!("p{i}")),
+                    &objs[0],
+                    BitEnum::new(),
+                    Some(value.clone()),
+                )
+                .unwrap();
+            }
+            commit(tx);
+            let root = db.state_root().unwrap();
+            let dumps: Vec<_> = RELATIONS
+                .iter()
+                .map(|r| db.canonical_relation(r).unwrap().encode())
+                .collect();
+            db.stop().unwrap();
+            (root, dumps)
+        };
+        let (db, fresh) = MoorDB::try_open(Some(dir.path()), DatabaseConfig::default()).unwrap();
+        assert!(!fresh);
+        assert_eq!(db.state_root().unwrap(), root);
+        for (name, before) in RELATIONS.iter().zip(&dumps) {
+            assert_eq!(
+                &db.canonical_relation(name).unwrap().encode(),
+                before,
+                "{name}"
+            );
+        }
+    }
+
     #[test]
     fn dump_of_a_relation_hashes_to_its_digest() {
         let (db, _) = MoorDB::try_open(None, DatabaseConfig::default()).unwrap();

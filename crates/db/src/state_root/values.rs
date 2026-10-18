@@ -714,11 +714,79 @@ mod tests {
 
     #[test]
     fn float_is_carried_as_its_bits() {
-        assert_ne!(encode(&v_float(0.0)), encode(&v_float(-0.0)));
         assert_eq!(
             cbor::diagnostic(&encode(&v_float(1.0)), false).unwrap(),
             format!("[3, {}]", 1.0f64.to_bits())
         );
+    }
+
+    /// There is one zero: `-0.0` is folded into `0.0` when the value is built, so both encode as
+    /// `[3, 0]` (state-root-v0 section 3.2).
+    #[test]
+    fn negative_zero_encodes_as_positive_zero() {
+        assert_eq!(encode(&v_float(-0.0)), encode(&v_float(0.0)));
+        assert_eq!(
+            cbor::diagnostic(&encode(&v_float(-0.0)), false).unwrap(),
+            "[3, 0]"
+        );
+    }
+
+    #[test]
+    fn subnormals_and_extremes_encode_as_their_bits() {
+        for f in [
+            f64::from_bits(1),
+            -f64::from_bits(1),
+            f64::MIN_POSITIVE,
+            f64::MAX,
+            f64::MIN,
+        ] {
+            assert_eq!(
+                cbor::diagnostic(&encode(&v_float(f)), false).unwrap(),
+                format!("[3, {}]", f.to_bits())
+            );
+            round_trip(v_float(f));
+        }
+    }
+
+    #[test]
+    fn negative_zero_nested_in_containers_is_canonical() {
+        let zero = v_float(0.0);
+        let neg = v_float(-0.0);
+        let sub = v_float(f64::from_bits(1));
+        let nest = |z: &Var| {
+            v_list(&[
+                z.clone(),
+                v_list(&[z.clone(), sub.clone()]),
+                v_map(&[(v_str("k"), z.clone()), (z.clone(), sub.clone())]),
+                v_flyweight(
+                    Obj::mk_id(7),
+                    &[(Symbol::mk("a"), z.clone())],
+                    moor_var::List::mk_list(&[z.clone()]),
+                ),
+            ])
+        };
+        assert_eq!(encode(&nest(&neg)), encode(&nest(&zero)));
+        round_trip(nest(&neg));
+    }
+
+    /// MOO floats are finite (`E_FLOAT` stops the rest earlier); the decoder refuses the bits of
+    /// an infinity or NaN, with either sign, rather than building a value that cannot be stored.
+    #[test]
+    fn decoder_rejects_non_finite_float_bits() {
+        for f in [
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+            -f64::NAN,
+            f64::from_bits(0x7ff0_0000_0000_0001),
+        ] {
+            let mut e = Encoder::new();
+            e.array(2);
+            e.uint(var_type::FLOAT);
+            e.uint(f.to_bits());
+            let bytes = e.into_bytes();
+            assert!(decode_var(&mut Decoder::new(&bytes)).is_err(), "{f:?}");
+        }
     }
 
     #[test]
