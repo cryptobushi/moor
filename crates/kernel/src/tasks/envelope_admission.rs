@@ -724,6 +724,13 @@ fn admit_revoke_all(
     }))
 }
 
+fn commit_admission(ws: Box<dyn WorldState>) -> Result<(), AdmissionRejection> {
+    match ws.commit().map_err(storage)? {
+        CommitResult::Success { .. } => Ok(()),
+        CommitResult::ConflictRetry { .. } => Err(storage("admission transaction conflicted")),
+    }
+}
+
 /// The first terminal result on a handle, skipping `Suspended` notices.
 pub(crate) fn take_result(handle: &TaskHandle) -> Option<Result<Var, SchedulerError>> {
     handle
@@ -750,25 +757,60 @@ impl Scheduler {
         Domain::new(self.config.deterministic.domain_salt)
     }
 
-    /// Run admission in its own transaction and commit it. Returns the decision.
-    fn admission_transaction(
+    /// Run admission in a new transaction and leave it open: the decision and the transaction
+    /// holding its writes. A rejection rolls the transaction back.
+    fn admission_open(
         &self,
         f: impl FnOnce(&mut Store<'_>) -> Result<Decision, AdmissionRejection>,
-    ) -> Result<Decision, AdmissionRejection> {
+    ) -> Result<(Decision, Box<dyn WorldState>), AdmissionRejection> {
         let mut ws = self.database.new_world_state().map_err(storage)?;
         let decision = Store::new(ws.as_mut()).and_then(|mut store| f(&mut store));
         match decision {
-            Ok(decision) => match ws.commit().map_err(storage)? {
-                CommitResult::Success { .. } => Ok(decision),
-                CommitResult::ConflictRetry { .. } => {
-                    Err(storage("admission transaction conflicted"))
-                }
-            },
+            Ok(decision) => Ok((decision, ws)),
             Err(rejection) => {
                 ws.rollback().map_err(storage)?;
                 Err(rejection)
             }
         }
+    }
+
+    /// Run admission in its own transaction and commit it. Returns the decision.
+    fn admission_transaction(
+        &self,
+        f: impl FnOnce(&mut Store<'_>) -> Result<Decision, AdmissionRejection>,
+    ) -> Result<Decision, AdmissionRejection> {
+        let (decision, ws) = self.admission_open(f)?;
+        commit_admission(ws)?;
+        Ok(decision)
+    }
+
+    /// The nonce a session last consumed, read from the committed state.
+    fn committed_last_nonce(&self, session: u32) -> Result<u64, AdmissionRejection> {
+        let mut ws = self.database.new_world_state().map_err(storage)?;
+        let last = Store::new(ws.as_mut()).and_then(|store| store.session(session))?;
+        ws.rollback().map_err(storage)?;
+        Ok(last.last_nonce)
+    }
+
+    /// After a folded envelope's tasks ran: make sure its nonce is committed. The nonce rode in the
+    /// first transaction of the envelope's task, which commits it in the common case. If that
+    /// transaction rolled back (the command aborted), or no task took it, consume the nonce now
+    /// in a transaction of its own, so an aborted command still uses up its nonce (ADR 0005
+    /// decision 3). Deterministic: the same inputs take the same path on every replay.
+    fn settle_folded_nonce(
+        &self,
+        env: &Envelope,
+        domain: &Domain,
+        block: &BlockContext,
+    ) -> Result<(), AdmissionRejection> {
+        if let Some(untaken) = self.preopened_tx.lock().take() {
+            return commit_admission(untaken);
+        }
+        if self.committed_last_nonce(env.session)? >= u64::from(env.nonce) {
+            return Ok(());
+        }
+        self.admission_transaction(|store| admit(store, domain, block, env))
+            .map(|_| ())
     }
 
     fn system_hook(
@@ -838,7 +880,19 @@ impl Scheduler {
             return run;
         };
         let domain = self.envelope_domain();
-        let decision = self.admission_transaction(|store| admit(store, &domain, &block, &env));
+        // Admission runs in a transaction of its own; for a command or connect that transaction is
+        // left open and handed to the envelope's task, so the nonce commits with the task's first
+        // transaction (one commit instead of two per command).
+        let decision = self
+            .admission_open(|store| admit(store, &domain, &block, &env))
+            .and_then(|(decision, ws)| {
+                if matches!(decision, Decision::Run(..)) {
+                    *self.preopened_tx.lock() = Some(ws);
+                } else {
+                    commit_admission(ws)?;
+                }
+                Ok(decision)
+            });
         let admitted = match decision {
             Err(rejection) => {
                 run.admission = Err(rejection);
@@ -862,6 +916,11 @@ impl Scheduler {
                     _ => unreachable!("only commands and connects run tasks"),
                 };
                 (run.task_id, run.result) = self.run_task(submitted, budget, &mut run.run);
+                if let Err(rejection) = self.settle_folded_nonce(&env, &domain, &block) {
+                    // The command already ran; its nonce could not be recorded. Admission state is
+                    // world state, so this is a storage fault, not an envelope verdict.
+                    tracing::error!(%rejection, "could not settle a folded admission nonce");
+                }
                 admitted
             }
             Ok(Decision::Create { wallet, payload }) => {

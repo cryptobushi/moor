@@ -58,6 +58,7 @@ use crate::{
 use arc_swap::ArcSwap;
 use flume::{Receiver, Sender};
 use moor_common::{
+    model::WorldState,
     tasks::{SchedulerError, SystemControl},
     threading::{TaskPoolAffinityConfig, set_task_pool_affinity_config},
 };
@@ -134,6 +135,11 @@ pub struct Scheduler {
     /// Deterministic mode only: transaction conflicts seen. Serial execution makes these
     /// impossible; a non-zero count is a bug, and each one aborted its task.
     pub(crate) deterministic_conflicts: Arc<AtomicU64>,
+
+    /// Deterministic mode only: a transaction the admission step opened and wrote the envelope's
+    /// nonce into, handed to the next new task dispatched (the envelope's command or connect
+    /// task), so admission commits with that task instead of in a transaction of its own.
+    pub(crate) preopened_tx: Arc<Mutex<Option<Box<dyn WorldState>>>>,
 }
 
 impl Scheduler {
@@ -239,6 +245,7 @@ impl Scheduler {
             timer_notify: Arc::new((Mutex::new(false), Condvar::new())),
             manual_queue,
             deterministic_conflicts: Arc::new(AtomicU64::new(0)),
+            preopened_tx: Arc::new(Mutex::new(None)),
         };
 
         s.reload_server_options();

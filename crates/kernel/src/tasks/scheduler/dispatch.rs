@@ -70,8 +70,20 @@ impl TaskLifecycle {
         // Start its new transaction... On the manual executor (deterministic mode) the snapshot is
         // taken when the job runs, not now: a job queued behind another must see that job's commit
         // (audit S2). Only one transaction is open at a time there, so commits never conflict.
+        let is_new = matches!(task.state, crate::tasks::task::TaskState::Pending(_));
         let transaction = if self.task_q.thread_pool.is_manual() {
-            TaskTransaction::AtRun(scheduler.database.clone())
+            // A new task may inherit the transaction the admission step opened for it (the
+            // envelope's nonce is already written there). Nothing runs between admission and this
+            // dispatch, so that snapshot is current.
+            let preopened = if is_new {
+                scheduler.preopened_tx.lock().take()
+            } else {
+                None
+            };
+            match preopened {
+                Some(world_state) => TaskTransaction::Open(world_state),
+                None => TaskTransaction::AtRun(scheduler.database.clone()),
+            }
         } else {
             match database.new_world_state() {
                 Ok(ws) => TaskTransaction::Open(ws),
