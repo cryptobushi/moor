@@ -277,3 +277,51 @@ fn receipt_digest_is_the_file_hash() {
     let bytes = std::fs::read(dir.path().join("segments").join(&receipt.location)).unwrap();
     assert_eq!(receipt.digest, moor_block::sha256(&[&bytes]));
 }
+
+#[test]
+fn checkpoints_publish_after_their_block_and_read_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut sink = open(&dir);
+    let chain = sealed(6);
+    let root = chain[3].header.header.state_root;
+    // Height 4 is not published yet.
+    assert!(sink.publish_checkpoint(4, &root, b"cp").is_err());
+    sink.publish(&segment(&chain, 1, 6, true)).unwrap();
+    let receipt = sink.publish_checkpoint(4, &root, b"cp").unwrap().unwrap();
+    assert!(receipt.fresh);
+    assert_eq!(receipt.tip_hash, chain[3].header.header.hash());
+    assert_eq!(receipt.location, "checkpoints/000000000004.rwcp");
+    // Idempotent; a different file at the same height conflicts.
+    assert!(
+        !sink
+            .publish_checkpoint(4, &root, b"cp")
+            .unwrap()
+            .unwrap()
+            .fresh
+    );
+    assert!(matches!(
+        sink.publish_checkpoint(4, &root, b"other"),
+        Err(SinkError::Conflict { height: 4 })
+    ));
+    assert_eq!(sink.checkpoint_heights().unwrap(), [4]);
+    assert_eq!(
+        sink.read_checkpoint(4).unwrap().as_deref(),
+        Some(&b"cp"[..])
+    );
+    assert_eq!(sink.read_checkpoint(5).unwrap(), None);
+}
+
+#[test]
+fn a_checkpoint_with_another_root_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut sink = open(&dir);
+    let chain = sealed(3);
+    sink.publish(&segment(&chain, 1, 3, true)).unwrap();
+    let mut root = chain[1].header.header.state_root;
+    root[0] ^= 1;
+    assert!(matches!(
+        sink.publish_checkpoint(2, &root, b"cp"),
+        Err(SinkError::Conflict { height: 2 })
+    ));
+    assert!(sink.checkpoint_heights().unwrap().is_empty());
+}

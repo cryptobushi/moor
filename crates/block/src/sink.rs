@@ -73,4 +73,28 @@ pub trait DaSink {
     /// The published segments holding heights `from..=to` (whole segments, in order). Heights past
     /// the tip are simply absent.
     fn read(&self, from: u64, to: u64) -> Result<Vec<Segment>, SinkError>;
+
+    /// Publish a checkpoint (ADR 0006 decision 7): `bytes` is the checkpoint file of the state
+    /// after the published block at `height`, whose state root is `state_root`. The sink checks
+    /// that the block is published with that root; it does not parse the file (a reader verifies
+    /// it against the chain). Idempotent per height. A sink that carries no checkpoints returns
+    /// `Ok(None)` (the default).
+    fn publish_checkpoint(
+        &mut self,
+        _height: u64,
+        _state_root: &Hash,
+        _bytes: &[u8],
+    ) -> Result<Option<Receipt>, SinkError> {
+        Ok(None)
+    }
+
+    /// Heights of the checkpoints the sink holds, ascending.
+    fn checkpoint_heights(&self) -> Result<Vec<u64>, SinkError> {
+        Ok(Vec::new())
+    }
+
+    /// The checkpoint file published at `height`, if the sink holds one.
+    fn read_checkpoint(&self, _height: u64) -> Result<Option<Vec<u8>>, SinkError> {
+        Ok(None)
+    }
 }

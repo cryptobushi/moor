@@ -21,6 +21,9 @@
 //! - `index`: a 16-byte magic, then one 160-byte record per segment, appended and fsynced after
 //!   the segment file: `first_be64 || tip_be64 || tip_timestamp_be64 || file_len_be64 ||
 //!   tip_hash || tip_state_root || file_sha256 || SHA-256(the preceding 128 bytes)`.
+//! - `checkpoints/<height:012>.rwcp`: published checkpoints (ADR 0006 decision 7), each the state
+//!   after the published block at its height. Written like segments; not indexed (the file is
+//!   self-verifying against the chain's state root at its height).
 //! - `LOCK`: held with an exclusive lock while the sink is open.
 //!
 //! A crash can leave a torn last index record (dropped on open) or a segment file the index does
@@ -38,6 +41,8 @@ const INDEX_MAGIC: &[u8; 16] = b"rw/v1/fsink-idx\n";
 const RECORD_LEN: usize = 160;
 const RECORD_BODY: usize = 128;
 const SEGMENTS: &str = "segments";
+const CHECKPOINTS: &str = "checkpoints";
+const CHECKPOINT_EXTENSION: &str = "rwcp";
 
 /// Whether a sink requires segments to carry event batches.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -327,6 +332,88 @@ impl DaSink for FileSink {
             .map(|r| self.read_record(r))
             .collect()
     }
+
+    fn publish_checkpoint(
+        &mut self,
+        height: u64,
+        state_root: &Hash,
+        bytes: &[u8],
+    ) -> Result<Option<Receipt>, SinkError> {
+        let header = self
+            .read(height.max(1), height)?
+            .into_iter()
+            .find_map(|s| s.block(height).map(|b| b.header))
+            .filter(|_| height > 0)
+            .ok_or(SinkError::OutOfOrder {
+                first: height,
+                tip: self.published_tip()?,
+            })?;
+        if header.state_root != *state_root {
+            return Err(SinkError::Conflict { height });
+        }
+        let dir = self.dir.join(CHECKPOINTS);
+        fs::create_dir_all(&dir)?;
+        let name = checkpoint_file_name(height);
+        let path = dir.join(&name);
+        let receipt = |fresh| Receipt {
+            first_height: height,
+            tip_height: height,
+            tip_hash: header.hash(),
+            location: format!("{CHECKPOINTS}/{name}"),
+            digest: sha256(&[bytes]),
+            bytes: bytes.len() as u64,
+            attested_time: None,
+            fresh,
+        };
+        if let Ok(existing) = fs::read(&path) {
+            if existing == bytes {
+                return Ok(Some(receipt(false)));
+            }
+            return Err(SinkError::Conflict { height });
+        }
+        let tmp = dir.join(format!("{name}.tmp"));
+        {
+            let mut file = File::create(&tmp)?;
+            file.write_all(bytes)?;
+            file.sync_all()?;
+        }
+        fs::rename(&tmp, &path)?;
+        File::open(&dir)?.sync_all()?;
+        Ok(Some(receipt(true)))
+    }
+
+    fn checkpoint_heights(&self) -> Result<Vec<u64>, SinkError> {
+        let dir = self.dir.join(CHECKPOINTS);
+        if !dir.exists() {
+            return Ok(Vec::new());
+        }
+        let mut heights: Vec<u64> = fs::read_dir(dir)?
+            .filter_map(Result::ok)
+            .filter_map(|e| {
+                let name = e.file_name().into_string().ok()?;
+                let stem = name.strip_suffix(&format!(".{CHECKPOINT_EXTENSION}"))?;
+                (stem.len() == 12).then(|| stem.parse().ok()).flatten()
+            })
+            .collect();
+        heights.sort_unstable();
+        Ok(heights)
+    }
+
+    fn read_checkpoint(&self, height: u64) -> Result<Option<Vec<u8>>, SinkError> {
+        match fs::read(
+            self.dir
+                .join(CHECKPOINTS)
+                .join(checkpoint_file_name(height)),
+        ) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+}
+
+fn checkpoint_file_name(height: u64) -> String {
+    format!("{height:012}.{CHECKPOINT_EXTENSION}")
 }
 
 /// Read the index, dropping a torn tail, and check its records chain.
