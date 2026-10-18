@@ -123,7 +123,7 @@ mod spec {
                 .collect();
             let state = spec.state.unwrap_or(root);
             let events_root = mth(&events);
-            let mut header = vec![0x88, 0x01];
+            let mut header = vec![0x88, 0x02];
             head(&mut header, 0, height);
             bstr(&mut header, &hash);
             head(&mut header, 0, ts + spec.dt);
@@ -158,7 +158,7 @@ mod spec {
         let mut p = vec![0x89];
         head(&mut p, 3, 13);
         p.extend(b"rw/v1/segment");
-        p.extend([0x01, 0x00]);
+        p.extend([0x02, 0x00]);
         bstr(&mut p, &[0; 32]);
         p.push(0x00);
         bstr(&mut p, &genesis);

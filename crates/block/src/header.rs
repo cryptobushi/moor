@@ -19,7 +19,7 @@ use crate::hash::{Hash, sha256};
 use crate::sign::{ChainParams, HeaderSignature, SequencerKey, SignatureError};
 
 /// The block format version this crate writes and reads.
-pub const BLOCK_VERSION: u64 = 1;
+pub const BLOCK_VERSION: u64 = 2;
 
 /// `parent_hash` of block 1.
 pub const GENESIS_PARENT_HASH: Hash = [0; 32];

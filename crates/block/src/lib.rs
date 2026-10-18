@@ -18,6 +18,7 @@
 //!   SHA-256 of the canonical header without the signature.
 //! - [`CommandBatch`]: the ordered inputs of a block, envelopes carried verbatim.
 //! - [`EventBatch`]: the ordered committed events of a block.
+//! - [`Meter`]: the engine's per-input measurement, event entry `[5, meter]` (ADR 0007).
 //! - [`merkle`]: RFC 6962 roots and inclusion proofs for `commands_root` and `events_root`.
 //! - [`Segment`]: the published, zstd-compressed run of consecutive blocks.
 //! - [`DaSink`] and [`FileSink`]: where segments are published.
@@ -36,6 +37,7 @@ mod file_sink;
 mod hash;
 mod header;
 pub mod merkle;
+mod meter;
 mod segment;
 mod sign;
 mod sink;
@@ -50,6 +52,7 @@ pub use file_sink::{EventPolicy, FileSink};
 pub use hash::{EMPTY_ROOT, Hash, hex, sha256, unhex};
 pub use header::{BLOCK_VERSION, BlockHeader, GENESIS_PARENT_HASH, SignedHeader, seed_for};
 pub use merkle::InclusionProof;
+pub use meter::{METER_EVENT_TAG, Meter, MeterKind, MeterOutcome};
 pub use segment::{
     Block, ChainTip, MAX_SEGMENT_BLOCKS, MAX_SEGMENT_PAYLOAD_BYTES, SEGMENT_TAG, SealedBlock,
     Segment, ZSTD_LEVEL,
