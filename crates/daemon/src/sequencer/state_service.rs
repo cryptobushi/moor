@@ -62,9 +62,14 @@ pub struct StateRequest {
 #[derive(Debug)]
 pub enum StateReply {
     /// The relation's canonical entries as `key-hex value-hex` lines, after the block at `height`.
-    Entries { height: u64, body: Vec<u8> },
+    Entries {
+        height: u64,
+        body: Vec<u8>,
+    },
     /// The requested height is not the sealed tip.
-    NotTip { tip: u64 },
+    NotTip {
+        tip: u64,
+    },
     /// No such relation.
     UnknownRelation,
     Failed(String),
@@ -185,8 +190,8 @@ impl Service {
                 return Ok(Some(found));
             }
             if attempt == 0 {
-                *cached =
-                    RelationLog::open_read_only(self.state_dir.join("blocks")).map_err(|e| e.to_string())?;
+                *cached = RelationLog::open_read_only(self.state_dir.join("blocks"))
+                    .map_err(|e| e.to_string())?;
             }
         }
         Ok(None)
@@ -222,13 +227,9 @@ impl Service {
             },
             Ok(StateReply::NotTip { tip }) => Response::json(
                 "409 Conflict",
-                format!(
-                    "{{\"error\":\"only the sealed tip can be dumped live\",\"tip\":{tip}}}\n"
-                ),
+                format!("{{\"error\":\"only the sealed tip can be dumped live\",\"tip\":{tip}}}\n"),
             ),
-            Ok(StateReply::UnknownRelation) => {
-                Response::error("404 Not Found", "no such relation")
-            }
+            Ok(StateReply::UnknownRelation) => Response::error("404 Not Found", "no such relation"),
             Ok(StateReply::Failed(e)) => Response::error("500 Internal Server Error", &e),
             Err(_) => Response::error("504 Gateway Timeout", "the block thread did not answer"),
         }
@@ -400,7 +401,11 @@ mod tests {
                 .collect(),
         );
         assert_eq!(
-            (json["height"].as_u64(), json["state_root"].as_str(), json["relations"].as_array().map(Vec::len)),
+            (
+                json["height"].as_u64(),
+                json["state_root"].as_str(),
+                json["relations"].as_array().map(Vec::len)
+            ),
             (Some(3), Some(hex(&root.root).as_str()), Some(14))
         );
     }
@@ -431,7 +436,10 @@ mod tests {
         let mut raw = String::new();
         stream.read_to_string(&mut raw).unwrap();
         handle.stop();
-        assert!(raw.contains("X-Rw-Height: 5\r\n") && raw.ends_with("01 02\n"), "{raw}");
+        assert!(
+            raw.contains("X-Rw-Height: 5\r\n") && raw.ends_with("01 02\n"),
+            "{raw}"
+        );
     }
 
     #[test]

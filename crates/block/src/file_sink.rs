@@ -441,9 +441,11 @@ impl DaSink for FileSink {
 
     fn genesis(&self) -> Result<Option<GenesisRecord>, SinkError> {
         match fs::read(self.dir.join(GENESIS_FILE)) {
-            Ok(bytes) => Ok(Some(GenesisRecord::decode(&bytes).map_err(|e| {
-                SinkError::Corrupt(format!("{GENESIS_FILE}: {e}"))
-            })?)),
+            Ok(bytes) => {
+                Ok(Some(GenesisRecord::decode(&bytes).map_err(|e| {
+                    SinkError::Corrupt(format!("{GENESIS_FILE}: {e}"))
+                })?))
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e.into()),
         }

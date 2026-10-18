@@ -422,7 +422,13 @@ pub fn resume(
             .ok_or(RecoveryError::Rebuild(root))?
     };
     if base < sealed {
-        replay_stored(&mut driver, &mut store, &chain.genesis_root, base + 1, sealed)?;
+        replay_stored(
+            &mut driver,
+            &mut store,
+            &chain.genesis_root,
+            base + 1,
+            sealed,
+        )?;
     }
     let replayed = sealed - base;
 

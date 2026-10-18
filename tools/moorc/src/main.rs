@@ -359,8 +359,7 @@ fn replay_sink(
     options: &ReplaySinkOptions<'_>,
 ) -> Result<(), eyre::Report> {
     use moor_block::{
-        ChainParams, ChainTip, DaSink, EventPolicy, FileSink, GenesisRecord,
-        durable::RelationLog,
+        ChainParams, ChainTip, DaSink, EventPolicy, FileSink, GenesisRecord, durable::RelationLog,
     };
     use moor_common::deterministic::DeterministicMode;
     use moor_kernel::tasks::sequencer::{Published, replay_block_full};
@@ -548,7 +547,11 @@ fn replay_sink(
             .map_err(|e| eyre!("reading the state: {e}"))?;
         moor_db::state_root::dump::write_dump(dir, prev.height, &root, &relations)
             .map_err(|e| eyre!("writing the dump to {}: {e}", dir.display()))?;
-        println!("state dump at height {} written to {}", prev.height, dir.display());
+        println!(
+            "state dump at height {} written to {}",
+            prev.height,
+            dir.display()
+        );
     }
     driver.shutdown().map_err(|e| eyre!("{e}"))?;
     Ok(())

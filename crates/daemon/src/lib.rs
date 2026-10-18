@@ -758,6 +758,7 @@ fn start_sequencer(
         }
         Ok(())
     };
+    let known_chain_existed = store.chain().is_some();
     let known_chain = match store.chain() {
         Some(chain) => {
             if chain.sequencer != key.address() {
@@ -826,6 +827,16 @@ fn start_sequencer(
             "the sink's genesis record is for root {}, the chain's is {}",
             moor_block::hex(&published.genesis_root),
             moor_block::hex(&chain.genesis_root)
+        );
+    }
+    if known_chain_existed
+        && moor_block::DaSink::genesis(&sink)
+            .map_err(|e| eyre!("reading the sink's genesis record: {e}"))?
+            .is_none()
+    {
+        warn!(
+            "this chain predates the genesis record (S1-13): the sink has no genesis.cbor, and \
+             the record is only written when a chain is created"
         );
     }
     let guard = SigningGuard::open(&guard_path, chain)

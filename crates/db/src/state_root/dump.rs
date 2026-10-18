@@ -26,7 +26,10 @@ use std::{
 };
 
 /// The `.entries` text of a relation: one `<key hex> <value hex>` line per entry.
-pub fn write_entries(out: &mut impl std::io::Write, relation: &CanonicalRelation) -> std::io::Result<()> {
+pub fn write_entries(
+    out: &mut impl std::io::Write,
+    relation: &CanonicalRelation,
+) -> std::io::Result<()> {
     for (k, v) in &relation.entries {
         writeln!(out, "{} {}", hex(k), hex(v))?;
     }

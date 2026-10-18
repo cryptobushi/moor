@@ -33,7 +33,9 @@ use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use super::{DurableError, RelationHash, RelationLog, lock_exclusive, record, sync_dir, timed_sync};
+use super::{
+    DurableError, RelationHash, RelationLog, lock_exclusive, record, sync_dir, timed_sync,
+};
 use crate::cbor::{Decoder, Encoder};
 use crate::command::CommandBatch;
 use crate::event::EventBatch;

@@ -87,7 +87,10 @@ impl RelationLog {
         file.read_to_end(&mut bytes)?;
         if bytes.len() < MAGIC.len() {
             if !MAGIC.starts_with(&bytes) {
-                return Err(DurableError::corrupt(path.display().to_string(), "no magic"));
+                return Err(DurableError::corrupt(
+                    path.display().to_string(),
+                    "no magic",
+                ));
             }
             file.set_len(0)?;
             file.write_all(MAGIC)?;

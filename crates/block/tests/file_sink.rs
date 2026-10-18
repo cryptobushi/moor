@@ -388,7 +388,10 @@ fn an_idempotent_republish_reports_the_original_receipt_time() {
     let sink = sink.with_clock(|| 1_800_000_000);
     let mut sink = sink;
     let receipt = sink.publish(&segment(&chain, 1, 3, true)).unwrap();
-    assert_eq!((receipt.fresh, receipt.attested_time), (false, Some(1_700_000_000)));
+    assert_eq!(
+        (receipt.fresh, receipt.attested_time),
+        (false, Some(1_700_000_000))
+    );
 }
 
 #[test]
@@ -410,11 +413,20 @@ fn a_first_format_index_is_read_without_receipt_times_and_migrated_on_a_writable
     std::fs::write(&path, &v1).unwrap();
     let ro = FileSink::open_read_only(dir.path(), EventPolicy::Require).unwrap();
     assert_eq!(ro.read(1, 2).unwrap()[0].receipt_time, None);
-    assert_eq!(std::fs::read(&path).unwrap(), v1, "a read-only open writes nothing");
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        v1,
+        "a read-only open writes nothing"
+    );
     let mut sink = open(&dir).with_clock(fixed_clock);
     assert_eq!(sink.published_tip().unwrap(), 2);
     sink.publish(&segment(&chain, 3, 4, true)).unwrap();
-    let times: Vec<_> = sink.read(1, 4).unwrap().iter().map(|p| p.receipt_time).collect();
+    let times: Vec<_> = sink
+        .read(1, 4)
+        .unwrap()
+        .iter()
+        .map(|p| p.receipt_time)
+        .collect();
     assert_eq!(times, vec![None, Some(1_700_000_000)]);
 }
 
@@ -450,17 +462,27 @@ fn a_read_only_open_beside_a_writer_sees_only_complete_segments() {
 #[test]
 fn a_read_only_open_does_not_modify_the_directory() {
     let dir = tempfile::tempdir().unwrap();
-    open(&dir).publish(&segment(&sealed(3), 1, 3, true)).unwrap();
+    open(&dir)
+        .publish(&segment(&sealed(3), 1, 3, true))
+        .unwrap();
     // A torn tail and a stray temporary: a writable open would repair both.
     let index = dir.path().join("index");
-    OpenOptions::new().append(true).open(&index).unwrap().write_all(&[1; 9]).unwrap();
+    OpenOptions::new()
+        .append(true)
+        .open(&index)
+        .unwrap()
+        .write_all(&[1; 9])
+        .unwrap();
     let tmp = dir.path().join("segments").join("x.tmp");
     std::fs::write(&tmp, b"x").unwrap();
     let before = std::fs::read(&index).unwrap();
     let _reader = FileSink::open_read_only(dir.path(), EventPolicy::Require).unwrap();
     assert_eq!(std::fs::read(&index).unwrap(), before);
     assert!(tmp.exists());
-    assert!(!dir.path().join("LOCK").metadata().is_err(), "the writer's lock file is untouched");
+    assert!(
+        !dir.path().join("LOCK").metadata().is_err(),
+        "the writer's lock file is untouched"
+    );
 }
 
 #[test]
@@ -522,7 +544,10 @@ fn the_genesis_record_is_idempotent_and_never_replaced() {
     sink.put_genesis(&record).unwrap();
     let mut other = record.clone();
     other.fork_commit = "def".into();
-    assert!(matches!(sink.put_genesis(&other), Err(SinkError::GenesisConflict)));
+    assert!(matches!(
+        sink.put_genesis(&other),
+        Err(SinkError::GenesisConflict)
+    ));
 }
 
 #[test]

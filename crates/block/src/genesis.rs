@@ -313,7 +313,10 @@ mod tests {
                     sha256: [2; 32],
                 },
             ],
-            features: vec![("custom_errors".into(), true), ("flyweight_type".into(), false)],
+            features: vec![
+                ("custom_errors".into(), true),
+                ("flyweight_type".into(), false),
+            ],
             principals: vec![Principal {
                 player: 2,
                 wallet: Address([3; 20]),

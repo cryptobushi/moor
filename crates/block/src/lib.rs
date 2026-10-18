@@ -51,6 +51,7 @@ pub use command::{
 pub use error::FormatError;
 pub use event::{EventBatch, EventEntry, EventId};
 pub use file_sink::{EventPolicy, FileSink};
+pub use genesis::{CoreFile, GENESIS_FILE, GenesisRecord, Principal, core_hash, core_manifest};
 pub use hash::{EMPTY_ROOT, Hash, hex, sha256, unhex};
 pub use header::{BLOCK_VERSION, BlockHeader, GENESIS_PARENT_HASH, SignedHeader, seed_for};
 pub use merkle::InclusionProof;
@@ -62,5 +63,4 @@ pub use segment::{
 pub use sign::{
     Address, ChainParams, HeaderSignature, SequencerKey, SignatureError, signing_digest,
 };
-pub use genesis::{CoreFile, GENESIS_FILE, GenesisRecord, Principal, core_hash, core_manifest};
 pub use sink::{DaSink, PublishedSegment, PublishedTip, Receipt, SinkError};

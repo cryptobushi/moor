@@ -3566,7 +3566,10 @@ mod sequencer {
             assert_eq!(replayed.output.outcomes.len(), block.commands.len());
             if i == 3 {
                 // Block 4's second command is the forged one: its verdict is in the output.
-                assert!(matches!(replayed.output.outcomes[1].admission, Some(Err(_))));
+                assert!(matches!(
+                    replayed.output.outcomes[1].admission,
+                    Some(Err(_))
+                ));
             }
             prev = ChainTip::of(&block.header);
         }
@@ -3582,13 +3585,7 @@ mod sequencer {
         assert!(matches!(out.outcomes[0].result, Some(Ok(_))));
         let mut driver = world.take_driver();
         let mut prev = ChainTip::genesis(&driver.state_root().unwrap().root);
-        replay_block_full(
-            &mut driver,
-            &prev,
-            &published[0],
-            Published::default(),
-        )
-        .unwrap();
+        replay_block_full(&mut driver, &prev, &published[0], Published::default()).unwrap();
         prev = ChainTip::of(&published[0].header);
         // Block 2 claims a different state root, and the sequencer's recorded hashes (honest)
         // differ from the claim in one relation: the replay names it.
