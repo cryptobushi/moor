@@ -369,6 +369,7 @@ pub struct BlockDriver {
     job_budget: usize,
     root_at_end_block: bool,
     metering: MeterState,
+    metering_enabled: bool,
 }
 
 /// A charged input waiting for settlement at `end_block`.
@@ -414,7 +415,14 @@ impl BlockDriver {
             job_budget: DEFAULT_JOB_BUDGET,
             root_at_end_block: true,
             metering: MeterState::default(),
+            metering_enabled: true,
         }
+    }
+
+    /// Turn the engine meter off (no `[5, meter]` entries, no ceiling, no charge hook) or back on.
+    /// On by default. For cost measurements; a chain must not change this between blocks.
+    pub fn set_metering(&mut self, enabled: bool) {
+        self.metering_enabled = enabled;
     }
 
     /// The canonical bytes of state attributed to each home world since this driver started
@@ -470,8 +478,8 @@ impl BlockDriver {
         self.block = block;
         *lock(&self.batch) = EventBatch::default();
         self.outcomes.clear();
-        meter::set_active(true);
-        moor_db::commit_meter::set_enabled(true);
+        meter::set_active(self.metering_enabled);
+        moor_db::commit_meter::set_enabled(self.metering_enabled);
         meter::begin_block();
         self.metering.meters.clear();
         self.metering.settle.clear();
@@ -684,6 +692,9 @@ impl BlockDriver {
 
     /// Reset the meter for the next input (the caller has advanced the command index).
     fn begin_metered_input(&mut self, kind: MeterKind) {
+        if !self.metering_enabled {
+            return;
+        }
         let _ = moor_db::commit_meter::take();
         let ceiling = self.scheduler.config.deterministic.command_tick_maximum();
         meter::begin_command(kind, SYSTEM_OBJECT.id().0, 0, Some(ceiling));
@@ -699,6 +710,9 @@ impl BlockDriver {
         outcome: MeterOutcome,
         reservation: Option<&crate::tasks::charge::Reservation>,
     ) {
+        if !self.metering_enabled {
+            return;
+        }
         let live = meter::live();
         let delta = moor_db::commit_meter::take();
         let outcome = if live.limit_hit && outcome == MeterOutcome::Ok {
@@ -744,7 +758,7 @@ impl BlockDriver {
     /// task per charged world (ascending), then `meter_total` on `#0`, each world and each
     /// player. Runs outside any input (command index 0) and emits no events.
     fn settle_block(&mut self) {
-        if self.metering.settle.is_empty() {
+        if !self.metering_enabled || self.metering.settle.is_empty() {
             return;
         }
         deterministic::set_block(self.block);
@@ -778,6 +792,9 @@ impl BlockDriver {
 
     /// Fold this block's storage change into the held-by-world and held-by-payer ledgers.
     fn attribute_storage(&mut self) {
+        if !self.metering_enabled {
+            return;
+        }
         let started = std::time::Instant::now();
         let objects = std::mem::take(&mut self.metering.block_objects);
         let payers = std::mem::take(&mut self.metering.block_payers);

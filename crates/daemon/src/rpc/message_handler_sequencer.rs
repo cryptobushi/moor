@@ -72,6 +72,7 @@ fn envelope_run(
         task_id: receipt.task_id,
         result: receipt.result,
         run: RunSummary::default(),
+        reservation: None,
     })
 }
 

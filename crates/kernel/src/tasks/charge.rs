@@ -148,7 +148,7 @@ fn is_default_program(program: &Program) -> bool {
 
 /// What reserving a command's charge decided.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Reservation {
+pub struct Reservation {
     /// The charged world (`#0` when the player is in none).
     pub world: Obj,
     /// The core classified the command as only leaving the world.

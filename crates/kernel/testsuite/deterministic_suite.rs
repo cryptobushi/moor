@@ -5119,6 +5119,41 @@ add_property(#0, "thing_parent", T, {player, "r"});
         text
     }
 
+    /// Microseconds per signed command with no policy, and with the policy stub installed
+    /// (reserve + settle). Run with `--ignored --nocapture` under `release-fast`.
+    #[test]
+    #[ignore = "measurement, not a check"]
+    fn perf_charge_overhead() {
+        const N: u32 = 1_000;
+        for policy in [false, true] {
+            let (mut world, player, _) = started(policy, 0);
+            let mut nonce = 0u32;
+            let mut samples = Vec::new();
+            for round in 0..5u64 {
+                let envs: Vec<_> = (0..N)
+                    .map(|_| {
+                        nonce += 1;
+                        command(&key(1), player, 1, nonce, "ping x").encode()
+                    })
+                    .collect();
+                let driver = world.driver();
+                driver.begin_block(block(3 + round));
+                let t = std::time::Instant::now();
+                for env in &envs {
+                    driver.submit_envelope(env, noop());
+                }
+                let per = t.elapsed().as_secs_f64() * 1e6 / f64::from(N);
+                let t = std::time::Instant::now();
+                driver.end_block();
+                if round > 0 {
+                    samples.push((per, t.elapsed().as_secs_f64() * 1e3));
+                }
+            }
+            samples.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+            println!("PERF policy={policy}: median {:.1} us/command, end_block {:.2} ms", samples[samples.len() / 2].0, samples[samples.len() / 2].1);
+        }
+    }
+
     #[test]
     fn meters_are_identical_across_20_runs() {
         let first = transcript();
@@ -5160,5 +5195,63 @@ add_property(#0, "thing_parent", T, {player, "r"});
         let runs: Vec<String> = (0..20).map(|_| child()).collect();
         assert!(runs[0].contains("Meter {"), "{}", runs[0]);
         assert!(runs.windows(2).all(|w| w[0] == w[1]), "{runs:#?}");
+    }
+}
+
+mod meter_perf {
+    use std::time::Instant;
+
+    use super::admission::{command, create_player, key, noop, world_with};
+    use super::executor::block;
+    use moor_common::deterministic::DeterministicMode;
+
+    /// Microseconds per signed `ping` with the meter off and on (2,000 per block), alternating,
+    /// plus the storage attribution cost. Run with `--ignored --nocapture` under `release-fast`.
+    #[test]
+    #[ignore = "measurement, not a check"]
+    fn perf_meter_overhead() {
+        const N: u32 = 2_000;
+        let mut world = world_with(DeterministicMode::on());
+        let player = create_player(&mut world);
+        let mut nonce = 0u32;
+        let mut height = 3;
+        let mut results = [Vec::new(), Vec::new()];
+        for round in 0..6 {
+            for (i, enabled) in [false, true].into_iter().enumerate() {
+                let envs: Vec<_> = (0..N)
+                    .map(|_| {
+                        nonce += 1;
+                        command(&key(1), player, 1, nonce, "ping x").encode()
+                    })
+                    .collect();
+                let driver = world.driver();
+                driver.set_metering(enabled);
+                driver.begin_block(block(height));
+                height += 1;
+                let started = Instant::now();
+                for env in &envs {
+                    driver.submit_envelope(env, noop());
+                }
+                let loop_time = started.elapsed();
+                let end = Instant::now();
+                let out = driver.end_block();
+                let end_time = end.elapsed();
+                assert_eq!(out.conflicts, 0);
+                if round > 0 {
+                    results[i].push(loop_time.as_secs_f64() * 1e6 / f64::from(N));
+                    println!(
+                        "PERF round {round} meter={enabled}: {:.1} us/command, end_block {:.2} ms, attribution total {} us",
+                        loop_time.as_secs_f64() * 1e6 / f64::from(N),
+                        end_time.as_secs_f64() * 1e3,
+                        driver.storage_attribution_nanos() / 1000
+                    );
+                }
+            }
+        }
+        for (i, name) in ["off", "on"].iter().enumerate() {
+            let mut v = results[i].clone();
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            println!("PERF meter {name}: median {:.1} us/command (min {:.1})", v[v.len() / 2], v[0]);
+        }
     }
 }
