@@ -16,7 +16,10 @@
 mod common;
 
 use common::*;
-use moor_block::{ChainTip, DaSink, EventPolicy, FileSink, SealedBlock, Segment, SinkError};
+use moor_block::{
+    ChainTip, CoreFile, DaSink, EventPolicy, FileSink, GenesisRecord, Principal, PublishedSegment,
+    SealedBlock, Segment, SinkError,
+};
 use std::fs::OpenOptions;
 use std::io::Write as _;
 
@@ -43,6 +46,10 @@ fn segment(sealed: &[SealedBlock], from: usize, to: usize, events: bool) -> Segm
     Segment::from_sealed(prev, &sealed[from - 1..to], events).unwrap()
 }
 
+fn plain(read: Vec<PublishedSegment>) -> Vec<Segment> {
+    read.into_iter().map(|p| p.segment).collect()
+}
+
 fn open(dir: &tempfile::TempDir) -> FileSink {
     FileSink::open(dir.path(), EventPolicy::Require).unwrap()
 }
@@ -60,7 +67,7 @@ fn publishes_and_reads_in_order() {
     for s in &segments {
         sink.publish(s).unwrap();
     }
-    assert_eq!(sink.read(1, 9).unwrap(), segments);
+    assert_eq!(plain(sink.read(1, 9).unwrap()), segments);
 }
 
 #[test]
@@ -213,7 +220,7 @@ fn optional_policy_stores_segments_without_events() {
     let mut sink = FileSink::open(dir.path(), EventPolicy::Optional).unwrap();
     let s = segment(&sealed(2), 1, 2, false);
     sink.publish(&s).unwrap();
-    assert_eq!(sink.read(1, 2).unwrap(), vec![s]);
+    assert_eq!(plain(sink.read(1, 2).unwrap()), vec![s]);
 }
 
 #[test]
@@ -224,7 +231,7 @@ fn reopened_sink_keeps_its_tip_and_segments() {
     open(&dir).publish(&s).unwrap();
     let sink = open(&dir);
     assert_eq!(
-        (sink.tip(), sink.read(1, 5).unwrap()),
+        (sink.tip(), plain(sink.read(1, 5).unwrap())),
         (Some(chain[4].tip()), vec![s])
     );
 }
@@ -324,4 +331,208 @@ fn a_checkpoint_with_another_root_is_refused() {
         Err(SinkError::Conflict { height: 2 })
     ));
     assert!(sink.checkpoint_heights().unwrap().is_empty());
+}
+
+fn fixed_clock() -> u64 {
+    1_700_000_000
+}
+
+#[test]
+fn read_returns_the_receipt_time_of_each_segment() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut sink = open(&dir).with_clock(fixed_clock);
+    let chain = sealed(4);
+    let receipt = sink.publish(&segment(&chain, 1, 2, true)).unwrap();
+    sink.publish(&segment(&chain, 3, 4, true)).unwrap();
+    let times: Vec<_> = sink
+        .read(1, 4)
+        .unwrap()
+        .iter()
+        .map(|p| p.receipt_time)
+        .collect();
+    assert_eq!(
+        (receipt.attested_time, times),
+        (Some(1_700_000_000), vec![Some(1_700_000_000); 2])
+    );
+}
+
+#[test]
+fn the_default_receipt_time_is_the_write_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut sink = open(&dir);
+    let before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    sink.publish(&segment(&sealed(2), 1, 2, true)).unwrap();
+    let got = sink.read(1, 2).unwrap()[0].receipt_time.unwrap();
+    assert!(got >= before && got <= before + 5, "{got} vs {before}");
+}
+
+#[test]
+fn published_tip_info_carries_the_tip_segments_receipt_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut sink = open(&dir).with_clock(fixed_clock);
+    assert_eq!(sink.published_tip_info().unwrap().receipt_time, None);
+    sink.publish(&segment(&sealed(3), 1, 3, true)).unwrap();
+    let tip = sink.published_tip_info().unwrap();
+    assert_eq!((tip.height, tip.receipt_time), (3, Some(1_700_000_000)));
+}
+
+#[test]
+fn an_idempotent_republish_reports_the_original_receipt_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut sink = open(&dir).with_clock(fixed_clock);
+    let chain = sealed(3);
+    sink.publish(&segment(&chain, 1, 3, true)).unwrap();
+    let sink = sink.with_clock(|| 1_800_000_000);
+    let mut sink = sink;
+    let receipt = sink.publish(&segment(&chain, 1, 3, true)).unwrap();
+    assert_eq!((receipt.fresh, receipt.attested_time), (false, Some(1_700_000_000)));
+}
+
+#[test]
+fn a_first_format_index_is_read_without_receipt_times_and_migrated_on_a_writable_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let chain = sealed(4);
+    open(&dir)
+        .with_clock(fixed_clock)
+        .publish(&segment(&chain, 1, 2, true))
+        .unwrap();
+    // Rewrite the index as the first format: v1 magic, 160-byte records without receipt time.
+    let path = dir.path().join("index");
+    let bytes = std::fs::read(&path).unwrap();
+    let mut v1 = b"rw/v1/fsink-idx\n".to_vec();
+    let mut record = bytes[16..16 + 128].to_vec();
+    let check = moor_block::sha256(&[&record]);
+    record.extend_from_slice(&check);
+    v1.extend_from_slice(&record);
+    std::fs::write(&path, &v1).unwrap();
+    let ro = FileSink::open_read_only(dir.path(), EventPolicy::Require).unwrap();
+    assert_eq!(ro.read(1, 2).unwrap()[0].receipt_time, None);
+    assert_eq!(std::fs::read(&path).unwrap(), v1, "a read-only open writes nothing");
+    let mut sink = open(&dir).with_clock(fixed_clock);
+    assert_eq!(sink.published_tip().unwrap(), 2);
+    sink.publish(&segment(&chain, 3, 4, true)).unwrap();
+    let times: Vec<_> = sink.read(1, 4).unwrap().iter().map(|p| p.receipt_time).collect();
+    assert_eq!(times, vec![None, Some(1_700_000_000)]);
+}
+
+#[test]
+fn a_read_only_open_takes_no_lock_and_sees_published_segments() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut writer = open(&dir);
+    let chain = sealed(4);
+    writer.publish(&segment(&chain, 1, 4, true)).unwrap();
+    let reader = FileSink::open_read_only(dir.path(), EventPolicy::Require).unwrap();
+    assert!(reader.is_read_only());
+    assert_eq!(reader.published_tip().unwrap(), 4);
+    assert_eq!(reader.read(1, 4).unwrap().len(), 1);
+}
+
+#[test]
+fn a_read_only_open_beside_a_writer_sees_only_complete_segments() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut writer = open(&dir);
+    let chain = sealed(4);
+    writer.publish(&segment(&chain, 1, 2, true)).unwrap();
+    // The writer is mid-append: a torn next index record.
+    OpenOptions::new()
+        .append(true)
+        .open(dir.path().join("index"))
+        .unwrap()
+        .write_all(&[0xab; 70])
+        .unwrap();
+    let reader = FileSink::open_read_only(dir.path(), EventPolicy::Require).unwrap();
+    assert_eq!(reader.published_tip().unwrap(), 2);
+}
+
+#[test]
+fn a_read_only_open_does_not_modify_the_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    open(&dir).publish(&segment(&sealed(3), 1, 3, true)).unwrap();
+    // A torn tail and a stray temporary: a writable open would repair both.
+    let index = dir.path().join("index");
+    OpenOptions::new().append(true).open(&index).unwrap().write_all(&[1; 9]).unwrap();
+    let tmp = dir.path().join("segments").join("x.tmp");
+    std::fs::write(&tmp, b"x").unwrap();
+    let before = std::fs::read(&index).unwrap();
+    let _reader = FileSink::open_read_only(dir.path(), EventPolicy::Require).unwrap();
+    assert_eq!(std::fs::read(&index).unwrap(), before);
+    assert!(tmp.exists());
+    assert!(!dir.path().join("LOCK").metadata().is_err(), "the writer's lock file is untouched");
+}
+
+#[test]
+fn a_read_only_open_of_a_missing_sink_is_an_error_and_creates_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("nope");
+    assert!(FileSink::open_read_only(&missing, EventPolicy::Require).is_err());
+    assert!(!missing.exists());
+}
+
+#[test]
+fn a_read_only_sink_refuses_to_publish() {
+    let dir = tempfile::tempdir().unwrap();
+    let chain = sealed(2);
+    open(&dir).publish(&segment(&chain, 1, 1, true)).unwrap();
+    let mut reader = FileSink::open_read_only(dir.path(), EventPolicy::Require).unwrap();
+    assert!(matches!(
+        reader.publish(&segment(&chain, 2, 2, true)),
+        Err(SinkError::ReadOnly)
+    ));
+}
+
+fn genesis_record(root: [u8; 32]) -> GenesisRecord {
+    GenesisRecord {
+        genesis_root: root,
+        sequencer: moor_block::Address([5; 20]),
+        fork_commit: "abc".into(),
+        core_files: vec![CoreFile {
+            path: "a.moo".into(),
+            sha256: [1; 32],
+        }],
+        features: vec![("custom_errors".into(), true)],
+        principals: vec![Principal {
+            player: 2,
+            wallet: moor_block::Address([6; 20]),
+        }],
+        domain_salt: [0; 32],
+    }
+}
+
+#[test]
+fn the_genesis_record_is_published_beside_block_zero_and_read_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut sink = open(&dir);
+    assert_eq!(sink.genesis().unwrap(), None);
+    let record = genesis_record(genesis_root());
+    sink.put_genesis(&record).unwrap();
+    drop(sink);
+    let reader = FileSink::open_read_only(dir.path(), EventPolicy::Require).unwrap();
+    assert_eq!(reader.genesis().unwrap(), Some(record));
+}
+
+#[test]
+fn the_genesis_record_is_idempotent_and_never_replaced() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut sink = open(&dir);
+    let record = genesis_record(genesis_root());
+    sink.put_genesis(&record).unwrap();
+    sink.put_genesis(&record).unwrap();
+    let mut other = record.clone();
+    other.fork_commit = "def".into();
+    assert!(matches!(sink.put_genesis(&other), Err(SinkError::GenesisConflict)));
+}
+
+#[test]
+fn a_genesis_record_for_another_root_is_refused_once_blocks_exist() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut sink = open(&dir);
+    sink.publish(&segment(&sealed(2), 1, 2, true)).unwrap();
+    assert!(matches!(
+        sink.put_genesis(&genesis_record([9; 32])),
+        Err(SinkError::GenesisMismatch(_))
+    ));
+    sink.put_genesis(&genesis_record(genesis_root())).unwrap();
 }

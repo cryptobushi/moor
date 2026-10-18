@@ -21,7 +21,8 @@
 //! - [`Meter`]: the engine's per-input measurement, event entry `[5, meter]` (ADR 0007).
 //! - [`merkle`]: RFC 6962 roots and inclusion proofs for `commands_root` and `events_root`.
 //! - [`Segment`]: the published, zstd-compressed run of consecutive blocks.
-//! - [`DaSink`] and [`FileSink`]: where segments are published.
+//! - [`DaSink`] and [`FileSink`]: where segments are published, with the receipt time of each.
+//! - [`GenesisRecord`]: the genesis set-up as data, published next to block 0.
 //! - [`durable`]: the sequencer's input journal, local block store and signing guard.
 //!
 //! Everything is RFC 8949 §4.2.1 deterministic CBOR ([`cbor`]), so two sequencers given the same
@@ -34,6 +35,7 @@ pub mod durable;
 mod error;
 mod event;
 mod file_sink;
+pub mod genesis;
 mod hash;
 mod header;
 pub mod merkle;
@@ -60,4 +62,5 @@ pub use segment::{
 pub use sign::{
     Address, ChainParams, HeaderSignature, SequencerKey, SignatureError, signing_digest,
 };
-pub use sink::{DaSink, Receipt, SinkError};
+pub use genesis::{CoreFile, GENESIS_FILE, GenesisRecord, Principal, core_hash, core_manifest};
+pub use sink::{DaSink, PublishedSegment, PublishedTip, Receipt, SinkError};

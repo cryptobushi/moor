@@ -28,6 +28,7 @@ mod block_store;
 mod guard;
 mod journal;
 pub mod record;
+mod relations;
 
 use std::fs::File;
 use std::path::Path;
@@ -36,6 +37,7 @@ use std::time::{Duration, Instant};
 pub use block_store::{BlockStore, StoreChain, StoredBlock};
 pub use guard::{Authorization, SigningGuard};
 pub use journal::{Journal, JournalledBlock};
+pub use relations::{RELATIONS_FILE, RelationHash, RelationLog};
 
 use crate::error::FormatError;
 use crate::hash::Hash;
@@ -67,6 +69,8 @@ pub enum DurableError {
     },
     #[error("block store already holds a different block at height {height}")]
     BlockConflict { height: u64 },
+    #[error("the relation log holds different hashes for height {height}")]
+    RelationsConflict { height: u64 },
     #[error("block store expected height {expected}, got {found}")]
     Height { expected: u64, found: u64 },
 }

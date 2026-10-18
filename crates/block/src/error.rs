@@ -79,4 +79,6 @@ pub enum FormatError {
     TipSignature,
     #[error("zstd: {0}")]
     Compression(String),
+    #[error("genesis record: {0}")]
+    Genesis(String),
 }

@@ -33,7 +33,7 @@ use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use super::{DurableError, lock_exclusive, record, sync_dir, timed_sync};
+use super::{DurableError, RelationHash, RelationLog, lock_exclusive, record, sync_dir, timed_sync};
 use crate::cbor::{Decoder, Encoder};
 use crate::command::CommandBatch;
 use crate::event::EventBatch;
@@ -108,6 +108,8 @@ pub struct BlockStore {
     len: u64,
     chain: Option<StoreChain>,
     blocks: Vec<Entry>,
+    /// Per-relation state hashes of sealed blocks (derived data, `relations.rwr`).
+    relations: RelationLog,
     _lock: File,
 }
 
@@ -203,6 +205,7 @@ impl BlockStore {
             len: scan.valid_len as u64,
             chain: None,
             blocks: Vec::new(),
+            relations: RelationLog::open(dir)?,
             _lock: lock,
         };
         for range in &scan.payloads {
@@ -278,6 +281,21 @@ impl BlockStore {
             (kind, n) => return Err(format!("unknown record type {kind} of {n} fields")),
         }
         Ok(())
+    }
+
+    /// Record the per-relation hashes of the block at `height` (fork API request R3). Not
+    /// fsynced: they are reproducible by replaying the block. A height recorded before must agree.
+    pub fn put_relations(
+        &mut self,
+        height: u64,
+        relations: &[RelationHash],
+    ) -> Result<bool, DurableError> {
+        self.relations.put(height, relations)
+    }
+
+    /// The recorded per-relation hashes of the block at `height`, if any.
+    pub fn relations(&self, height: u64) -> Result<Option<Vec<RelationHash>>, DurableError> {
+        self.relations.get(height)
     }
 
     /// The store's file.
@@ -631,5 +649,26 @@ mod tests {
             (store.sealed_height(), store.unsigned().map(|h| h.height)),
             (0, Some(1))
         );
+    }
+
+    #[test]
+    fn relation_hashes_survive_a_reopen_and_do_not_touch_the_block_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let hashes = vec![RelationHash {
+            name: "object_flags".into(),
+            hash: [3; 32],
+            entries: 4,
+        }];
+        {
+            let mut store = BlockStore::open(dir.path()).unwrap();
+            store.init_chain(chain()).unwrap();
+            seal(&mut store, 1);
+            let before = std::fs::read(store.path()).unwrap();
+            assert!(store.put_relations(1, &hashes).unwrap());
+            assert_eq!(std::fs::read(store.path()).unwrap(), before);
+        }
+        let store = BlockStore::open(dir.path()).unwrap();
+        assert_eq!(store.relations(1).unwrap(), Some(hashes));
+        assert_eq!(store.relations(2).unwrap(), None);
     }
 }
