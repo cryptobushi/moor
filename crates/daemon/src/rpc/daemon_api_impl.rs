@@ -978,6 +978,22 @@ impl RuntimeApi for RpcMessageHandler {
 // Helper methods for the typed path
 // ---------------------------------------------------------------------------
 
+/// The reply to a batch: each kernel result tagged with its correlation id.
+fn batch_reply(
+    correlation_ids: Vec<String>,
+    ws_results: Vec<moor_kernel::tasks::world_state_action::WorldStateResult>,
+) -> ClientReply {
+    let results = correlation_ids
+        .into_iter()
+        .zip(ws_results)
+        .map(|(id, result)| WorldStateResultEntry {
+            id,
+            result: convert_kernel_ws_result_to_typed(result),
+        })
+        .collect();
+    ClientReply::BatchWorldStateReply { results }
+}
+
 struct TypedLoginCommand {
     args: Vec<String>,
     attach: bool,
@@ -1711,6 +1727,19 @@ impl RpcMessageHandler {
             .map(|entry| convert_batch_action_to_kernel(*player, entry.action))
             .collect();
 
+        // Sequencer mode: no scheduler loop serves tasks, so a batch task would never run. Reads
+        // are answered from the last committed snapshot on this thread (ADR 0006 decision 1); a
+        // batch containing a write is refused (the gate already did, ahead of this).
+        if scheduler_client.is_sequencer_owned() {
+            let ws_results = scheduler_client
+                .read_world_state_batch(kernel_actions)
+                .map_err(|e| {
+                    error!(error = ?e, "Error reading batch world state");
+                    RpcMessageError::TaskError(e)
+                })?;
+            return Ok(batch_reply(correlation_ids, ws_results));
+        }
+
         let session = Arc::new(OutputCaptureSession::new(
             client_id,
             *player,
@@ -1734,22 +1763,7 @@ impl RpcMessageHandler {
                     });
 
                     match results {
-                        Ok(ws_results) => {
-                            let result_entries: Vec<WorldStateResultEntry> = correlation_ids
-                                .into_iter()
-                                .zip(ws_results)
-                                .map(|(id, result)| {
-                                    let typed_result = convert_kernel_ws_result_to_typed(result);
-                                    WorldStateResultEntry {
-                                        id,
-                                        result: typed_result,
-                                    }
-                                })
-                                .collect();
-                            break Ok(ClientReply::BatchWorldStateReply {
-                                results: result_entries,
-                            });
-                        }
+                        Ok(ws_results) => break Ok(batch_reply(correlation_ids, ws_results)),
                         Err(e) => break Err(RpcMessageError::TaskError(e)),
                     }
                 }

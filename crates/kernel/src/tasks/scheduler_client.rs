@@ -172,6 +172,13 @@ impl SchedulerClient {
         self.scheduler.sequencer_owned.load(Ordering::Acquire)
     }
 
+    /// Whether an external sequencer owns the block driver. Callers that would otherwise start a
+    /// task for a read (see [`Self::read_world_state_batch`]) branch on this.
+    #[must_use]
+    pub fn is_sequencer_owned(&self) -> bool {
+        self.sequencer_owned()
+    }
+
     fn ensure_running(&self) -> Result<(), SchedulerError> {
         if self.scheduler.state() != SchedulerState::Running {
             return Err(SchedulerError::SchedulerNotResponding);
@@ -745,6 +752,25 @@ impl SchedulerClient {
         self.request_with_timeout(DEFAULT_REQUEST_TIMEOUT, move |scheduler| {
             scheduler.execute_world_state_actions_inner(actions, rollback)
         })
+    }
+
+    /// Run a batch of read-only WorldStateActions on the caller's thread against the last
+    /// committed state, in a transaction that is always rolled back: no task, no command index,
+    /// nothing logged (RuneWorld ADR 0006 decision 1). A batch containing a write is refused while a
+    /// sequencer owns the block driver. Submitted as a task instead, a batch waits for a scheduler
+    /// loop that does not run there, which surfaced as HTTP 500 on `/v1/objects/query`.
+    pub fn read_world_state_batch(
+        &self,
+        actions: Vec<WorldStateAction>,
+    ) -> Result<Vec<WorldStateResult>, SchedulerError> {
+        let requests = actions.into_iter().map(WorldStateRequest::new).collect();
+        self.execute_world_state_actions(requests, true)?
+            .into_iter()
+            .map(|response| match response {
+                WorldStateResponse::Success { result, .. } => Ok(result),
+                WorldStateResponse::Error { error, .. } => Err(error),
+            })
+            .collect()
     }
 
     /// Submit a batch of WorldStateActions as a tracked task.
