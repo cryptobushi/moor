@@ -27,6 +27,7 @@
 //!            | [2, text]                             ; System message (traceback, abort)
 //!            | [3, kind | null, session, code, text] ; Rejected envelope
 //!            | [4, admitted]                         ; Sessions (delegation, revocation)
+//!            | [5, meter]                            ; Meter, one per input (see `moor_block::Meter`)
 //! narrative  = [event_id (bytes 16), secs, nanos, author (var), body]
 //! body       = [0, value (var), content_type (text | null), no_flush (bool), no_newline (bool),
 //!               metadata ([[key (text), value (var)]...] | null)]                  ; Notify
@@ -68,6 +69,8 @@ pub mod event_tag {
     pub const SYSTEM: u64 = 2;
     pub const REJECTED: u64 = 3;
     pub const SESSIONS: u64 = 4;
+    /// `[5, meter]` (block format version 2): the input's `moor_block::Meter`.
+    pub const METER: u64 = moor_block::METER_EVENT_TAG;
 }
 
 /// Tags of a narrative `body`.
@@ -103,6 +106,7 @@ pub fn rejection_code(reason: &AdmissionRejection) -> u64 {
         AdmissionRejection::DuplicateSessionKey(_) => 16,
         AdmissionRejection::CreationFailed(_) => 17,
         AdmissionRejection::Storage(_) => 18,
+        AdmissionRejection::ChargeDenied { .. } => 19,
     }
 }
 
@@ -155,6 +159,7 @@ pub fn encode_event(kind: &BlockEventKind) -> Result<Vec<u8>, CborError> {
             e.uint(event_tag::SESSIONS);
             admitted_into(&mut e, admitted);
         }
+        BlockEventKind::Meter(meter) => return Ok(meter.encode_event()),
     }
     Ok(e.into_bytes())
 }
@@ -168,12 +173,12 @@ pub fn entry_parts(event: &BlockEvent) -> Result<(u64, u64, i32, Vec<u8>), CborE
         )));
     }
     let recipient = event.player.id().0;
-    Ok((
-        event.seq,
-        event.command_index,
-        recipient,
-        encode_event(&event.kind)?,
-    ))
+    let bytes = if event.encoded.is_empty() {
+        encode_event(&event.kind)?
+    } else {
+        event.encoded.clone()
+    };
+    Ok((event.seq, event.command_index, recipient, bytes))
 }
 
 fn obj(e: &mut Encoder, o: &Obj) {

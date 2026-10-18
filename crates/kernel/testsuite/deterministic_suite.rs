@@ -581,6 +581,7 @@ mod executor {
                         reason,
                     } => format!("rejected {kind:?} session={session} {reason}"),
                     BlockEventKind::Sessions(admitted) => format!("sessions {admitted:?}"),
+                    BlockEventKind::Meter(m) => format!("meter {m:?}"),
                 };
                 format!(
                     "{} cmd={} task={:?} to={} {}",
@@ -643,7 +644,8 @@ mod executor {
         let mut world = World::start();
         let out = world.block(1, &[FORK_TREE, "notify(player, \"next\");"]);
         let indices: Vec<u64> = out.events.iter().map(|e| e.command_index).collect();
-        assert_eq!(indices, [1, 1, 1, 1, 2]);
+        // Each input ends with its meter entry.
+        assert_eq!(indices, [1, 1, 1, 1, 1, 2, 2]);
     }
 
     #[test]
@@ -1425,7 +1427,7 @@ mod admission {
         )
     }
 
-    fn noop() -> Arc<dyn Session> {
+    pub(super) fn noop() -> Arc<dyn Session> {
         Arc::new(NoopClientSession::new())
     }
 
@@ -1434,7 +1436,7 @@ mod admission {
         world_with(DeterministicMode::on())
     }
 
-    fn world_with(mode: DeterministicMode) -> World {
+    pub(super) fn world_with(mode: DeterministicMode) -> World {
         let mut world = World::start_with(mode);
         let out = world.block(1, &[GENESIS]);
         assert!(
@@ -1446,7 +1448,7 @@ mod admission {
     }
 
     /// Run envelopes as one block at `height`.
-    fn run(world: &mut World, height: u64, envs: &[&Envelope]) -> BlockOutput {
+    pub(super) fn run(world: &mut World, height: u64, envs: &[&Envelope]) -> BlockOutput {
         let driver = world.driver();
         driver.begin_block(block(height));
         for env in envs {
@@ -1455,7 +1457,7 @@ mod admission {
         driver.end_block()
     }
 
-    fn verdicts(out: &BlockOutput) -> Vec<Result<Admitted, AdmissionRejection>> {
+    pub(super) fn verdicts(out: &BlockOutput) -> Vec<Result<Admitted, AdmissionRejection>> {
         out.outcomes
             .iter()
             .map(|o| o.admission.clone().expect("envelope outcome"))
@@ -1471,7 +1473,7 @@ mod admission {
     }
 
     /// Mint a player for wallet 1 with session key 1 (session index 1). Returns the player.
-    fn create_player(world: &mut World) -> Obj {
+    pub(super) fn create_player(world: &mut World) -> Obj {
         let out = run(
             world,
             2,
@@ -1491,7 +1493,7 @@ mod admission {
         }
     }
 
-    fn eval(world: &mut World, height: u64, code: &str) -> Var {
+    pub(super) fn eval(world: &mut World, height: u64, code: &str) -> Var {
         let out = world.block(height, &[code]);
         match &out.outcomes[0].result {
             Some(Ok(v)) => v.clone(),
@@ -1580,7 +1582,8 @@ mod admission {
         assert!(
             matches!(
                 &out.events[..],
-                [e] if matches!(&e.kind, BlockEventKind::Rejected { kind: Some(EnvelopeKind::Command), session: 1, reason: AdmissionRejection::BadSignature })
+                [e, m] if matches!(&e.kind, BlockEventKind::Rejected { kind: Some(EnvelopeKind::Command), session: 1, reason: AdmissionRejection::BadSignature })
+                    && matches!(&m.kind, BlockEventKind::Meter(_))
             ),
             "{:?}",
             out.events
@@ -2044,7 +2047,7 @@ mod admission {
     }
 
     /// Run the signed log in a fresh world; returns every batch and the final admission state.
-    fn signed_run() -> String {
+    pub(super) fn signed_run() -> String {
         let mut world = world();
         // The player id the log signs for is the one the first delegation mints: max_object + 1.
         let player = Obj::mk_id(
@@ -3128,7 +3131,9 @@ mod sequencer {
             kinds,
             vec![
                 block_events::event_tag::NARRATIVE as u8,
-                block_events::event_tag::REJECTED as u8
+                block_events::event_tag::METER as u8,
+                block_events::event_tag::REJECTED as u8,
+                block_events::event_tag::METER as u8
             ]
         );
         seq.shutdown().unwrap();
@@ -3370,7 +3375,8 @@ mod sequencer {
             .iter()
             .map(|e| (e.seq, e.command_index))
             .collect();
-        assert_eq!(tags, vec![(0, 1), (1, 2)]);
+        // Each input's events are followed by its meter entry.
+        assert_eq!(tags, vec![(0, 1), (1, 1), (2, 2), (3, 2)]);
         seq.shutdown().unwrap();
     }
 
@@ -3392,7 +3398,7 @@ mod sequencer {
         seq.seal().unwrap();
         assert_eq!(
             (before_seal, receipt.events, receipt.command_index),
-            (vec!["\"pong soft\"".to_string()], 1, 1)
+            (vec!["\"pong soft\"".to_string()], 2, 1)
         );
         seq.shutdown().unwrap();
     }
@@ -4564,5 +4570,595 @@ mod durability {
             Err(moor_block::durable::DurableError::Locked(_))
         ));
         seq.shutdown().expect("shutdown");
+    }
+}
+
+/// The engine meter, the per-command tick ceiling and the `charge` call sites (RuneWorld ADR 0007,
+/// issue S1-9). The core's verbs are stood in for by the stubs in `SETUP`, which follow the S1-10
+/// contract (`docs/research/s1-10-report.md`).
+mod meter {
+    use moor_block::{Meter, MeterKind, MeterOutcome};
+    use moor_common::{
+        deterministic::DeterministicMode,
+        envelope::scope,
+    };
+    use moor_kernel::tasks::{
+        block_driver::{BlockEvent, BlockEventKind, BlockInput, BlockOutput},
+        block_events,
+        envelope_admission::{AdmissionRejection, Admitted},
+    };
+    use moor_var::{Obj, Var, v_int};
+
+    use super::admission::{
+        command, create_player, delegate, delegation, eval, key, noop, run, verdicts, wallet,
+        world_with,
+    };
+    use super::executor::{World, block, canonical};
+
+    /// A verb on `obj` (an expression) with the given body, one statement per line.
+    fn verb(obj: &str, name: &str, args: &str, body: &str) -> String {
+        let lines: Vec<String> = body
+            .trim()
+            .lines()
+            .map(|l| format!("\"{}\"", l.trim().replace('\\', "\\\\").replace('"', "\\\"")))
+            .collect();
+        format!(
+            "add_verb({obj}, {{player, \"rxd\", \"{name}\"}}, {args}); set_verb_code({obj}, \"{name}\", {{{}}});\n",
+            lines.join(", ")
+        )
+    }
+
+    /// The core's default `charge` body (S1-10): sponsor-all.
+    const DEFAULT_CHARGE: &str = r#"
+const {who, meter, phase} = args;
+typeof(meter) == TYPE_MAP && maphaskey(meter, 'ticks) || raise(E_INVARG, "charge needs a meter with ticks.");
+return $world:charge_allow(meter['ticks]);
+"#;
+
+    /// The core's `$sysobj:run_charge`, as S1-10 ships it.
+    const RUN_CHARGE: &str = r#"
+caller_perms().wizard || raise(E_PERM);
+const {who, meter, phase} = args;
+phase in {'reserve, 'settle} || raise(E_INVARG, "Phase is 'reserve or 'settle.");
+typeof(meter) == TYPE_MAP || raise(E_TYPE);
+let result = `#0:charge(who, meter, phase) ! ANY => 0';
+if (!this:_charge_result_ok(result))
+if (phase == 'reserve)
+result = $world:charge_deny("The deployment policy failed.");
+else
+result = $world:charge_allow(0);
+endif
+endif
+if (phase == 'reserve && !result['allow])
+return result;
+endif
+const world = `meter['world] ! E_RANGE => #-1';
+const leaving = `meter['leaving] ! E_RANGE => false';
+if (leaving || typeof(world) != TYPE_OBJ || !valid(world) || !isa(world, $world))
+return result;
+endif
+const world_result = `world:charge(who, meter, phase) ! ANY => 0';
+if (!this:_charge_result_ok(world_result))
+if (phase == 'reserve)
+return $world:charge_deny("The world's charge policy failed.");
+endif
+return result;
+endif
+if (!result['allow])
+return result;
+endif
+if (!world_result['allow])
+return world_result;
+endif
+return $world:charge_allow(min(result['ceiling], world_result['ceiling]));
+"#;
+
+    const RESULT_OK: &str = r#"
+const {r} = args;
+typeof(r) == TYPE_MAP || return false;
+maphaskey(r, 'allow) || return false;
+return r['allow] ? (maphaskey(r, 'ceiling) && typeof(r['ceiling]) == TYPE_INT && r['ceiling] >= 0) | (maphaskey(r, 'reason) && typeof(r['reason]) == TYPE_STR);
+"#;
+
+    /// The policy installed on world `Wi` when a test asks for one: a ceiling, a ban list, a ledger.
+    const POLICY: &str = r#"
+const {who, meter, phase} = args;
+if (phase == 'reserve)
+if (who in this.banned)
+return $world:charge_deny("banned from this world");
+endif
+this.reserved = {@this.reserved, {who, meter['kind], meter['leaving]}};
+return $world:charge_allow(this.cap);
+endif
+this.ledger[who] = (who in mapkeys(this.ledger) ? this.ledger[who] | 0) + meter['ticks];
+this.settled = {@this.settled, {who, meter['outcome], meter['ticks]}};
+return $world:charge_allow(0);
+"#;
+
+    /// Stubs of the S1-10 core: `#0.world`, defaults, `run_charge`, a world instance `Wi` with a
+    /// start room, and a player parent whose new players start inside `Wi`.
+    fn setup(policy: bool) -> String {
+        let mut s = String::from(
+            r#"
+W = create(#-1);
+add_property(#0, "world", W, {player, "r"});
+add_property(W, "meter_total", ['ticks -> 0, 'log_bytes -> 0, 'storage -> 0, 'settled_at -> 0], {player, "r"});
+add_property(#0.wallet_parent, "meter_total", ['ticks -> 0, 'log_bytes -> 0, 'storage -> 0, 'settled_at -> 0], {player, "r"});
+add_property(#0, "meter_total", ['ticks -> 0, 'log_bytes -> 0, 'storage -> 0, 'settled_at -> 0], {player, "r"});
+Wi = create(W);
+add_property(Wi, "cap", 1000000, {player, "r"});
+add_property(Wi, "banned", {}, {player, "r"});
+add_property(Wi, "ledger", [], {player, "r"});
+add_property(Wi, "reserved", {}, {player, "r"});
+add_property(Wi, "settled", {}, {player, "r"});
+room = create(#-1);
+move(room, Wi);
+add_property(#0, "start_room", room, {player, "r"});
+add_property(#0, "spun", 0, {player, "rw"});
+add_property(#0, "handled", 0, {player, "rw"});
+T = create(#-1);
+add_property(T, "home_world", #-1, {player, "r"});
+add_property(#0, "thing_parent", T, {player, "r"});
+"#,
+        );
+        s += &verb("W", "charge_allow", "{\"this\", \"none\", \"this\"}", "return ['allow -> true, 'ceiling -> args[1]];");
+        s += &verb("W", "charge_deny", "{\"this\", \"none\", \"this\"}", "return ['allow -> false, 'reason -> args[1]];");
+        s += &verb("W", "command_leaves", "{\"this\", \"none\", \"this\"}", "return args[2]['verb] == \"leave\";");
+        s += &verb("W", "charge", "{\"this\", \"none\", \"this\"}", DEFAULT_CHARGE);
+        s += &verb("#0", "charge", "{\"this\", \"none\", \"this\"}", DEFAULT_CHARGE);
+        s += &verb("#0", "run_charge", "{\"this\", \"none\", \"this\"}", RUN_CHARGE);
+        s += &verb("#0", "_charge_result_ok", "{\"this\", \"none\", \"this\"}", RESULT_OK);
+        s += &verb(
+            "#0",
+            "create_wallet_player",
+            "{\"this\", \"none\", \"this\"}",
+            "p = create(#0.wallet_parent);\nset_player_flag(p, 1);\np.name = args[2];\nmove(p, #0.start_room);\nreturn p;",
+        );
+        let wp = "#0.wallet_parent";
+        s += &verb(wp, "spin", "{\"any\", \"any\", \"any\"}", "#0.spun = 1;\nwhile (1)\nendwhile");
+        s += &verb(
+            wp,
+            "spinfork",
+            "{\"any\", \"any\", \"any\"}",
+            "#0.spun = 2;\nfork (0)\n#0.spun = 3;\nwhile (1)\nendwhile\nendfork",
+        );
+        s += &verb(wp, "leave", "{\"any\", \"any\", \"any\"}", "notify(player, \"left\");");
+        s += &verb(wp, "report", "{\"any\", \"any\", \"any\"}", "notify(player, toliteral(meter()));\nnotify(player, toliteral(meter_totals(player.location.location, 'block)));");
+        s += &verb(
+            wp,
+            "build",
+            "{\"any\", \"any\", \"any\"}",
+            "o = create(#0.thing_parent);\no.home_world = player.location.location;\nadd_property(o, \"pad\", \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\", {player, \"r\"});\nnotify(player, tostr(o));",
+        );
+        s += &verb("#0", "handle_task_timeout", "{\"this\", \"none\", \"this\"}", "#0.handled = 1;");
+        if policy {
+            s += &verb("Wi", "charge", "{\"this\", \"none\", \"this\"}", POLICY);
+        }
+        s += "return Wi;";
+        s
+    }
+
+    fn mode(max_command_ticks: u64) -> DeterministicMode {
+        DeterministicMode {
+            max_command_ticks,
+            ..DeterministicMode::on()
+        }
+    }
+
+    /// Genesis hooks, the stubs, and one player in `Wi`. Returns the world, the player and `Wi`.
+    fn started(policy: bool, max_command_ticks: u64) -> (World, Obj, Obj) {
+        let mut world = world_with(mode(max_command_ticks));
+        // Not height 1: definition ids derive from (height, command, counter), and genesis used it.
+        let out = world.block(90, &[&setup(policy)]);
+        let wi = match &out.outcomes[0].result {
+            Some(Ok(v)) => v.as_object().expect("Wi"),
+            other => panic!("setup failed: {other:?}"),
+        };
+        let player = create_player(&mut world);
+        (world, player, wi)
+    }
+
+    fn meters(out: &BlockOutput) -> Vec<Meter> {
+        out.meters.iter().map(|(_, m)| *m).collect()
+    }
+
+    fn meter_events(events: &[BlockEvent]) -> Vec<(u64, Meter)> {
+        events
+            .iter()
+            .filter_map(|e| match &e.kind {
+                BlockEventKind::Meter(m) => Some((e.command_index, *m)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn prop(world: &mut World, height: u64, expr: &str) -> Var {
+        eval(world, height, &format!("return {expr};"))
+    }
+
+    #[test]
+    fn every_input_ends_with_a_meter_entry_after_its_events() {
+        let (mut world, player, wi) = started(false, 0);
+        let out = run(
+            &mut world,
+            3,
+            &[
+                &command(&key(1), player, 1, 1, "ping a"),
+                &command(&key(1), player, 1, 2, "ping b"),
+            ],
+        );
+        let entries = meter_events(&out.events);
+        assert_eq!(entries.len(), 2, "{}", canonical(&out.events));
+        assert_eq!(entries.iter().map(|e| e.0).collect::<Vec<_>>(), [1, 2]);
+        for (i, event) in out.events.iter().enumerate() {
+            if let BlockEventKind::Meter(_) = event.kind {
+                // The meter follows the input's own narrative event and precedes the next input's.
+                assert!(matches!(out.events[i - 1].kind, BlockEventKind::Narrative(_)));
+            }
+        }
+        let m = entries[0].1;
+        assert_eq!(m.kind, MeterKind::Command);
+        assert_eq!(m.outcome, MeterOutcome::Ok);
+        assert_eq!(m.world, wi.id().0, "the player's current world is charged");
+        assert_eq!(m.tasks, 1);
+        assert_eq!(m.events, 1);
+        assert!(m.ticks > 0 && m.log_bytes > 0 && m.event_bytes > 0);
+        // The nonce moves from 0 to 1: the same canonical size, so nothing else was written.
+        assert_eq!(m.storage_delta, 0, "{m:?}");
+        assert_eq!(out.meters.iter().map(|(_, m)| *m).collect::<Vec<_>>(), meters(&out));
+    }
+
+    #[test]
+    fn a_meter_event_is_the_meter_encoding() {
+        let (mut world, player, _) = started(false, 0);
+        let out = run(&mut world, 3, &[&command(&key(1), player, 1, 1, "ping a")]);
+        let event = out.events.last().expect("meter entry");
+        let BlockEventKind::Meter(m) = event.kind else {
+            panic!("last event is not a meter")
+        };
+        let bytes = block_events::encode_event(&event.kind).expect("encodes");
+        assert_eq!(bytes, m.encode_event());
+        assert_eq!(Meter::decode_event(&bytes), Ok(Some(m)));
+    }
+
+    #[test]
+    fn rejected_envelopes_are_metered_as_aborted() {
+        let (mut world, player, _) = started(false, 0);
+        let mut bad = command(&key(1), player, 1, 1, "ping a");
+        bad.signature[3] ^= 1;
+        let out = run(&mut world, 3, &[&bad]);
+        let m = meters(&out)[0];
+        assert_eq!(m.outcome, MeterOutcome::Aborted);
+        assert_eq!((m.ticks, m.tasks), (0, 0));
+        assert_eq!(m.world, 0);
+    }
+
+    #[test]
+    fn fork_zero_children_and_the_parent_share_one_meter() {
+        let (mut world, _, _) = started(false, 0);
+        let one = world.driver();
+        one.begin_block(block(4));
+        let wiz: Obj = Obj::mk_id(3);
+        for code in [
+            "return 1;",
+            "fork (0) #0.spun = 5; endfork fork (0) #0.spun = 6; endfork return 1;",
+        ] {
+            one.submit(
+                BlockInput::Eval {
+                    player: wiz,
+                    code: code.into(),
+                },
+                noop(),
+            );
+        }
+        let out = one.end_block();
+        let m = meters(&out);
+        assert_eq!(m[0].tasks, 1);
+        assert_eq!(m[1].tasks, 3, "the parent and two children");
+        assert!(m[1].ticks > m[0].ticks);
+    }
+
+    #[test]
+    fn exceeding_the_tick_ceiling_rolls_back_and_runs_no_handler() {
+        let (mut world, player, _) = started(false, 5_000);
+        let out = run(&mut world, 3, &[&command(&key(1), player, 1, 1, "spin")]);
+        let m = meters(&out)[0];
+        assert_eq!(m.outcome, MeterOutcome::TickCeiling, "{m:?}");
+        assert!(m.ticks <= 5_000 && m.ticks >= 4_900, "ticks {}", m.ticks);
+        assert_eq!(m.storage_delta, 0, "only the (same-size) nonce is committed: {m:?}");
+        assert_eq!(prop(&mut world, 4, "#0.spun"), v_int(0), "no partial commit");
+        assert_eq!(prop(&mut world, 5, "#0.handled"), v_int(0), "no handler ran");
+        // The nonce is consumed: 1 is stale, 2 runs.
+        let out = run(
+            &mut world,
+            6,
+            &[
+                &command(&key(1), player, 1, 1, "ping again"),
+                &command(&key(1), player, 1, 2, "ping next"),
+            ],
+        );
+        assert!(matches!(
+            verdicts(&out)[0],
+            Err(AdmissionRejection::StaleNonce { .. })
+        ));
+        assert!(verdicts(&out)[1].is_ok());
+    }
+
+    #[test]
+    fn an_aborted_command_is_the_same_state_as_no_command_but_the_nonce() {
+        // Run the same block twice: once with the spinning command, once with a no-op command of
+        // the same nonce. The state differs by exactly nothing the command wrote.
+        let roots: Vec<_> = ["spin", "ping x"]
+            .iter()
+            .map(|text| {
+                let (mut world, player, _) = started(false, 5_000);
+                let out = run(&mut world, 3, &[&command(&key(1), player, 1, 1, text)]);
+                out.state_root.expect("root").expect("ok").relations
+            })
+            .collect();
+        // Only `ping` leaves narrative, no state: the two worlds agree relation by relation, so
+        // nothing of `spin` (the `#0.spun` write) is committed.
+        assert_eq!(roots[0], roots[1]);
+    }
+
+    #[test]
+    fn the_ceiling_spans_the_forked_children_of_a_command() {
+        let (mut world, player, _) = started(false, 5_000);
+        let out = run(&mut world, 3, &[&command(&key(1), player, 1, 1, "spinfork")]);
+        let m = meters(&out)[0];
+        assert_eq!(m.outcome, MeterOutcome::TickCeiling, "{m:?}");
+        assert_eq!(m.tasks, 2, "the parent and the child");
+        // The parent committed before the child ran; the child's own write is rolled back.
+        assert_eq!(prop(&mut world, 4, "#0.spun"), v_int(2));
+    }
+
+    #[test]
+    fn meter_builtins_report_the_command_so_far_and_the_block_totals() {
+        let (mut world, player, wi) = started(false, 0);
+        let out = run(
+            &mut world,
+            3,
+            &[
+                &command(&key(1), player, 1, 1, "ping a"),
+                &command(&key(1), player, 1, 2, "report"),
+            ],
+        );
+        let texts = super::executor::texts(&out.events);
+        let report = texts.iter().find(|t| t.contains("ceiling")).expect("meter()");
+        assert!(report.contains(&format!("'world -> {wi}")), "{report}");
+        assert!(report.contains("'tasks -> 1"), "{report}");
+        assert!(report.contains("'kind -> 'command"), "{report}");
+        let totals = texts.iter().find(|t| t.contains("inputs")).expect("totals");
+        assert!(totals.contains("'inputs -> 1"), "the first command is in the total: {totals}");
+    }
+
+    #[test]
+    fn sponsor_all_skips_the_hooks() {
+        let (mut world, player, wi) = started(false, 0);
+        let out = run(&mut world, 3, &[&command(&key(1), player, 1, 1, "ping a")]);
+        let m = meters(&out)[0];
+        assert_eq!(m.policy_ticks, 0, "no hook ran at 'reserve");
+        assert_eq!(
+            prop(&mut world, 4, &format!("{wi}.meter_total['ticks]")),
+            v_int(0),
+            "nothing settled"
+        );
+        assert_eq!(prop(&mut world, 5, "#0.meter_total['ticks]"), v_int(0));
+    }
+
+    #[test]
+    fn an_installed_policy_reserves_and_settles_once_per_block() {
+        let (mut world, player, wi) = started(true, 0);
+        let out = run(
+            &mut world,
+            3,
+            &[
+                &command(&key(1), player, 1, 1, "ping a"),
+                &command(&key(1), player, 1, 2, "ping b"),
+            ],
+        );
+        let ms = meters(&out);
+        assert!(ms.iter().all(|m| m.policy_ticks > 0), "{ms:?}");
+        let ticks: u64 = ms.iter().map(|m| m.ticks).sum();
+        let log: u64 = ms.iter().map(|m| m.log_bytes).sum();
+        // Reserved per command, settled once per block in command-index order.
+        let reserved = prop(&mut world, 4, &format!("length({wi}.reserved)"));
+        assert_eq!(reserved, v_int(2));
+        let settled = prop(&mut world, 5, &format!("{wi}.settled"));
+        assert_eq!(
+            moor_compiler::to_literal(&settled),
+            format!(
+                "{{{{{player}, 'ok, {}}}, {{{player}, 'ok, {}}}}}",
+                ms[0].ticks, ms[1].ticks
+            )
+        );
+        // meter_total on #0, the world and the player.
+        for target in ["#0".to_string(), wi.to_string(), player.to_string()] {
+            let t = prop(&mut world, 6, &format!("{target}.meter_total"));
+            let text = moor_compiler::to_literal(&t);
+            assert!(text.contains(&format!("'ticks -> {ticks}")), "{target}: {text}");
+            assert!(text.contains(&format!("'log_bytes -> {log}")), "{target}: {text}");
+        }
+        // The totals are state: they are in the root of the block that settled them.
+        let root = out.state_root.expect("root").expect("ok");
+        assert_eq!(root.root, world.driver().state_root().expect("root").root);
+        drop(world);
+        // A replay of the same inputs in a fresh world settles to the same root.
+        let (mut other, p2, _) = started(true, 0);
+        let out2 = run(
+            &mut other,
+            3,
+            &[
+                &command(&key(1), p2, 1, 1, "ping a"),
+                &command(&key(1), p2, 1, 2, "ping b"),
+            ],
+        );
+        assert_eq!(out2.state_root.expect("r").expect("ok").root, root.root);
+    }
+
+    #[test]
+    fn a_deny_policy_refuses_the_command_and_consumes_the_nonce() {
+        let (mut world, player, wi) = started(true, 0);
+        eval(&mut world, 2, &format!("{wi}.banned = {{{player}}}; return 1;"));
+        let out = run(
+            &mut world,
+            3,
+            &[
+                &command(&key(1), player, 1, 1, "ping a"),
+                &command(&key(1), player, 1, 1, "ping a"),
+            ],
+        );
+        let verdicts = verdicts(&out);
+        assert!(
+            matches!(&verdicts[0], Err(AdmissionRejection::ChargeDenied { reason, .. }) if reason == "banned from this world"),
+            "{:?}",
+            verdicts[0]
+        );
+        assert!(
+            matches!(verdicts[1], Err(AdmissionRejection::StaleNonce { .. })),
+            "the denied command's nonce is consumed: {:?}",
+            verdicts[1]
+        );
+        assert_eq!(meters(&out)[0].outcome, MeterOutcome::Denied);
+        assert!(super::executor::texts(&out.events).is_empty(), "nothing ran");
+        let rejected: Vec<_> = out
+            .events
+            .iter()
+            .filter_map(|e| match &e.kind {
+                BlockEventKind::Rejected { reason, .. } => Some((e.player, block_events::rejection_code(reason))),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rejected[0], (player, 19));
+    }
+
+    #[test]
+    fn leaving_a_world_is_not_charged_to_it() {
+        let (mut world, player, wi) = started(true, 0);
+        eval(&mut world, 2, &format!("{wi}.banned = {{{player}}}; return 1;"));
+        let out = run(&mut world, 3, &[&command(&key(1), player, 1, 1, "leave")]);
+        assert_eq!(super::executor::texts(&out.events), ["left"]);
+        assert_eq!(meters(&out)[0].outcome, MeterOutcome::Ok);
+        // The world's hook did not run at either phase.
+        assert_eq!(prop(&mut world, 4, &format!("length({wi}.reserved)")), v_int(0));
+        assert_eq!(prop(&mut world, 5, &format!("length({wi}.settled)")), v_int(0));
+    }
+
+    #[test]
+    fn a_policy_ceiling_sets_the_commands_tick_limit() {
+        let (mut world, player, wi) = started(true, 0);
+        eval(&mut world, 2, &format!("{wi}.cap = 3000; return 1;"));
+        let out = run(&mut world, 3, &[&command(&key(1), player, 1, 1, "spin")]);
+        let m = meters(&out)[0];
+        assert_eq!(m.outcome, MeterOutcome::TickCeiling);
+        assert!(m.ticks <= 3_000 && m.ticks > 2_900, "{m:?}");
+        assert_eq!(prop(&mut world, 4, "#0.spun"), v_int(0));
+    }
+
+    #[test]
+    fn objects_and_storage_are_counted_and_attributed_to_the_home_world() {
+        let (mut world, player, wi) = started(false, 0);
+        let out = run(&mut world, 3, &[&command(&key(1), player, 1, 1, "build")]);
+        let m = meters(&out)[0];
+        assert_eq!(m.objects_created, 1, "{m:?}");
+        assert!(m.storage_delta > 100, "{m:?}");
+        let driver = world.driver();
+        let by_world = driver.storage_held_by_world();
+        assert!(by_world.get(&wi).copied().unwrap_or(0) > 100, "{by_world:?}");
+        assert!(driver.storage_held_by_payer().get(&player).copied().unwrap_or(0) > 100);
+        let out = run(&mut world, 4, &[&command(&key(1), player, 1, 2, "ping x")]);
+        assert_eq!(meters(&out)[0].objects_created, 0);
+    }
+
+    #[test]
+    fn recycling_is_counted() {
+        let (mut world, _, _) = started(false, 0);
+        let out = world.block(
+            3,
+            &["o = create(#0.thing_parent); recycle(o); return 1;"],
+        );
+        let m = meters(&out)[0];
+        assert_eq!((m.objects_created, m.objects_recycled), (0, 0), "created and gone in one transaction");
+        let out = world.block(4, &["#0.spun = create(#0.thing_parent); return 1;"]);
+        assert_eq!(meters(&out)[0].objects_created, 1);
+        let out = world.block(5, &["recycle(#0.spun); return 1;"]);
+        assert_eq!(meters(&out)[0].objects_recycled, 1);
+    }
+
+    #[test]
+    fn a_delegation_is_metered_as_create() {
+        let mut world = world_with(mode(0));
+        let out = run(
+            &mut world,
+            2,
+            &[&delegate(&wallet(1), &key(1), delegation(&key(1), 1, true, scope::PLAY))],
+        );
+        assert_eq!(meters(&out)[0].kind, MeterKind::Create);
+    }
+
+    /// The meters of the standard (unsigned) log and the signed log, as text.
+    fn transcript() -> String {
+        let mut world = World::start();
+        let out = world.block(
+            3,
+            &[
+                "add_property(#0, \"log\", {}, {player, \"rw\"}); return 1;",
+                "fork (0) notify(player, \"a\"); endfork fork (0) #0.log = {random(1000)}; endfork return 1;",
+                "o = create(#1); move(o, #2); notify(player, tostr(o)); return o;",
+            ],
+        );
+        let mut text = out
+            .meters
+            .iter()
+            .map(|(i, m)| format!("{i} {m:?}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        drop(world);
+        text += "\n--signed--\n";
+        text += &super::admission::signed_run();
+        text
+    }
+
+    #[test]
+    fn meters_are_identical_across_20_runs() {
+        let first = transcript();
+        assert!(first.contains("meter Meter"), "{first}");
+        for _ in 1..20 {
+            assert_eq!(transcript(), first);
+        }
+    }
+
+    #[test]
+    #[ignore = "run as a subprocess by meters_are_identical_across_20_processes"]
+    fn meter_child() {
+        println!("METER-BEGIN\n{}\nMETER-END", transcript());
+    }
+
+    #[test]
+    fn meters_are_identical_across_20_processes() {
+        let child = || {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "meter::meter_child",
+                    "--exact",
+                    "--ignored",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .output()
+                .expect("run child");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let begin = stdout.find("METER-BEGIN\n").unwrap() + "METER-BEGIN\n".len();
+            let end = stdout.find("\nMETER-END").unwrap();
+            stdout[begin..end].to_string()
+        };
+        let runs: Vec<String> = (0..20).map(|_| child()).collect();
+        assert!(runs[0].contains("Meter {"), "{}", runs[0]);
+        assert!(runs.windows(2).all(|w| w[0] == w[1]), "{runs:#?}");
     }
 }

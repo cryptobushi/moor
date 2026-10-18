@@ -2060,6 +2060,10 @@ impl WorldStateTransaction {
         // Extract DB handle before consuming self
         let db = self.db.clone();
         let ws = self.into_working_sets()?;
+        // Storage metering (RuneWorld ADR 0007): measured on the write set, recorded on success.
+        let measured = crate::commit_meter::is_enabled().then(|| {
+            crate::state_root::working_set_delta(&ws)
+        });
 
         // Dispatch commit work directly under the DB commit lock.
         drop(_t);
@@ -2071,6 +2075,9 @@ impl WorldStateTransaction {
         let result = db.commit_writes(ws, enqueued_at);
         if let Ok(result) = &result {
             record_commit_result(result);
+            if let (Some(delta), CommitResult::Success { .. }) = (measured, result) {
+                crate::commit_meter::record(delta);
+            }
         }
         result
     }

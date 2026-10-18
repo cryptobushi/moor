@@ -357,6 +357,13 @@ impl Scheduler {
             return;
         }
 
+        // Deterministic mode runs no MOO code after an abort: a handler would commit effects
+        // for a command that must leave none (RuneWorld ADR 0007 ratification note 2).
+        if moor_common::deterministic::is_enabled() {
+            completion.finish(&mut lc);
+            return;
+        }
+
         // Attempt to invoke the handler verb as a separate task.
         let resource_str = match limit_reason {
             AbortLimitReason::Ticks(_) => "ticks",

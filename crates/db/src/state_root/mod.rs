@@ -404,6 +404,159 @@ pub(crate) fn canonical_relation(
     }
 }
 
+/// Canonical size of one `[key, value]` pair: the pair head plus both encodings.
+fn pair_size<D, C>(d: &D, c: &C, key: Encode<D>, value: Encode<C>) -> i64 {
+    let mut k = Encoder::new();
+    let mut v = Encoder::new();
+    // An unencodable value counts as zero: sizes are a measurement, not a commitment.
+    let _ = key(&mut k, d);
+    let _ = value(&mut v, c);
+    1 + k.as_bytes().len() as i64 + v.as_bytes().len() as i64
+}
+
+/// Add one relation's working set to `out`: for each written key, the pair size after the write
+/// minus the pair size the transaction started from, attributed to `owner(key)`. With `existence`,
+/// also counts rows created (an insert with no base row) and deleted.
+fn relation_delta<D, C>(
+    ws: &crate::tx::WorkingSet<D, C>,
+    key: Encode<D>,
+    value: Encode<C>,
+    owner: fn(&D) -> moor_var::Obj,
+    existence: bool,
+    out: &mut crate::commit_meter::CommitDelta,
+) where
+    D: RelationDomain,
+    C: RelationCodomain,
+{
+    use crate::tx::OpType;
+    for (d, op) in ws.tuples_ref() {
+        let before = ws
+            .base_value(d)
+            .map_or(0, |(_, c)| pair_size(d, &c, key, value));
+        let (after, existed_after) = match &op.operation {
+            OpType::Insert(c) | OpType::Update(c) => (pair_size(d, c, key, value), true),
+            OpType::Delete => (0, false),
+        };
+        out.add_storage(owner(d), after - before);
+        if existence {
+            let existed_before = ws.base_value(d).is_some();
+            match (existed_before, existed_after) {
+                (false, true) => out.created += 1,
+                (true, false) => out.recycled += 1,
+                _ => {}
+            }
+        }
+    }
+}
+
+/// The net canonical-size change of a transaction's write set, by object, and the objects it
+/// created and recycled. `sequences` is not included (fixed slot count, value sizes only).
+pub(crate) fn working_set_delta(
+    ws: &crate::engine::moor_db::WorkingSets,
+) -> crate::commit_meter::CommitDelta {
+    let mut out = crate::commit_meter::CommitDelta::default();
+    let obj_owner: fn(&moor_var::Obj) -> moor_var::Obj = |o| *o;
+    let uuid_owner: fn(&crate::ObjAndUUIDHolder) -> moor_var::Obj = |k| k.obj();
+    let meta_owner: fn(&crate::EntityMetadataKey) -> moor_var::Obj = |k| k.obj();
+    let o = &mut out;
+    relation_delta(&ws.object_location, obj_key, obj_key, obj_owner, false, o);
+    relation_delta(&ws.object_parent, obj_key, obj_key, obj_owner, false, o);
+    relation_delta(
+        &ws.object_flags,
+        obj_key,
+        |e, f| {
+            values::flags(e, f);
+            Ok(())
+        },
+        obj_owner,
+        true,
+        o,
+    );
+    relation_delta(&ws.object_owner, obj_key, obj_key, obj_owner, false, o);
+    relation_delta(
+        &ws.object_name,
+        obj_key,
+        |e, n| {
+            e.text(&n.0);
+            Ok(())
+        },
+        obj_owner,
+        false,
+        o,
+    );
+    relation_delta(
+        &ws.object_verbdefs,
+        obj_key,
+        values::verbdefs,
+        obj_owner,
+        false,
+        o,
+    );
+    relation_delta(
+        &ws.object_verbs,
+        obj_uuid_key,
+        values::program_type,
+        uuid_owner,
+        false,
+        o,
+    );
+    relation_delta(
+        &ws.object_propdefs,
+        obj_key,
+        |e, p| {
+            values::propdefs(e, p);
+            Ok(())
+        },
+        obj_owner,
+        false,
+        o,
+    );
+    relation_delta(
+        &ws.object_propvalues,
+        obj_uuid_key,
+        var_value,
+        uuid_owner,
+        false,
+        o,
+    );
+    relation_delta(
+        &ws.object_propflags,
+        obj_uuid_key,
+        |e, p| {
+            values::propperms(e, p);
+            Ok(())
+        },
+        uuid_owner,
+        false,
+        o,
+    );
+    relation_delta(
+        &ws.entity_metadata,
+        metadata_key,
+        var_value,
+        meta_owner,
+        false,
+        o,
+    );
+    relation_delta(
+        &ws.object_last_move,
+        obj_key,
+        var_value,
+        obj_owner,
+        false,
+        o,
+    );
+    relation_delta(
+        &ws.anonymous_object_metadata,
+        obj_key,
+        anonymous_metadata,
+        obj_owner,
+        false,
+        o,
+    );
+    out
+}
+
 /// The root over every relation of `snapshot`.
 pub(crate) fn state_root(
     snapshot: &WorldStateSnapshot,

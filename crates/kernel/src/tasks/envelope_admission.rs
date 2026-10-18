@@ -49,6 +49,7 @@ use crate::tasks::{
     TaskHandle, TaskNotification,
     scheduler::{Scheduler, manual::RunSummary},
 };
+use moor_block::MeterKind;
 use moor_common::{
     deterministic::{self, BlockContext},
     envelope::{
@@ -124,6 +125,9 @@ pub enum AdmissionRejection {
     CreationFailed(String),
     /// Admission state could not be read or written.
     Storage(String),
+    /// The charge hook denied the reservation, or failed (RuneWorld ADR 0007 decision 3). The
+    /// envelope was admitted: its nonce is consumed and `player` is whose command it was.
+    ChargeDenied { player: Obj, reason: String },
 }
 
 impl fmt::Display for AdmissionRejection {
@@ -166,6 +170,7 @@ impl fmt::Display for AdmissionRejection {
             Self::DuplicateSessionKey(s) => write!(f, "session key already registered as {s}"),
             Self::CreationFailed(why) => write!(f, "player creation failed: {why}"),
             Self::Storage(why) => write!(f, "admission state: {why}"),
+            Self::ChargeDenied { reason, .. } => write!(f, "charge denied: {reason}"),
         }
     }
 }
@@ -230,6 +235,8 @@ pub struct EnvelopeRun {
     pub result: Option<Result<Var, SchedulerError>>,
     /// Jobs run for this envelope (all of its tasks), and whether a budget ran out.
     pub run: RunSummary,
+    /// The charge hook's reservation, when the meter is active and the envelope ran a task.
+    pub reservation: Option<crate::tasks::charge::Reservation>,
 }
 
 /// A session table row.
@@ -865,6 +872,7 @@ impl Scheduler {
                     task_id: None,
                     result: None,
                     run: RunSummary::default(),
+                    reservation: None,
                 };
             }
         };
@@ -875,6 +883,7 @@ impl Scheduler {
             task_id: None,
             result: None,
             run: RunSummary::default(),
+            reservation: None,
         };
         let Some(block) = deterministic::current().map(|c| c.block) else {
             return run;
@@ -900,16 +909,37 @@ impl Scheduler {
             }
             Ok(Decision::Done(admitted)) => admitted,
             Ok(Decision::Run(admitted, text)) => {
+                let text = String::from_utf8(text).expect("checked UTF-8");
+                if crate::tasks::meter::is_active() {
+                    let kind = match &admitted {
+                        Admitted::Command { .. } => MeterKind::Command,
+                        _ => MeterKind::Connect,
+                    };
+                    let reservation =
+                        self.reserve_charge(&admitted, kind, &text, bytes.len() as u64);
+                    if let Some(reason) = reservation.denied.clone() {
+                        // Nothing runs. The reserve task committed the nonce with its own
+                        // transaction unless it rolled back; then it is consumed here.
+                        if let Err(rejection) = self.settle_folded_nonce(&env, &domain, &block) {
+                            tracing::error!(%rejection, "could not settle a folded admission nonce");
+                        }
+                        run.reservation = Some(reservation);
+                        run.admission = Err(AdmissionRejection::ChargeDenied {
+                            player: admitted.player(),
+                            reason,
+                        });
+                        return run;
+                    }
+                    crate::tasks::meter::set_ceiling(Some(reservation.ceiling));
+                    run.reservation = Some(reservation);
+                }
                 if let Some(f) = on_admitted {
                     f(&admitted);
                 }
                 let submitted = match &admitted {
-                    Admitted::Command { player, .. } => self.submit_command_task_inner(
-                        SYSTEM_OBJECT,
-                        *player,
-                        String::from_utf8(text).expect("checked UTF-8"),
-                        session,
-                    ),
+                    Admitted::Command { player, .. } => {
+                        self.submit_command_task_inner(SYSTEM_OBJECT, *player, text, session)
+                    }
                     Admitted::Connect { player, .. } => {
                         self.system_hook(*player, "user_connected", &[v_obj(*player)], session)
                     }

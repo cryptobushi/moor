@@ -277,7 +277,10 @@ impl Scheduler {
     }
 
     pub(crate) fn rollback_on_task_limit(&self) -> bool {
-        self.server_options.load().rollback_on_task_limit
+        // Deterministic mode always rolls back (RuneWorld ADR 0007 ratification note 2): a
+        // command that exceeds its tick ceiling must leave no committed effect, whatever
+        // `$server_options` says.
+        moor_common::deterministic::is_enabled() || self.server_options.load().rollback_on_task_limit
     }
 }
 

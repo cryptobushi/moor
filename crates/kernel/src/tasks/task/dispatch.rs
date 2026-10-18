@@ -500,6 +500,10 @@ impl Task {
             );
         }
 
+        if matches!(reason, AbortLimitReason::Ticks(_)) {
+            crate::tasks::meter::note_limit();
+        }
+
         // Collect traceback information for the handler
         let (stack_list, backtrace_list) = self.vm_host.get_traceback();
         let disposition = if task_scheduler_client.rollback_on_task_limit() {

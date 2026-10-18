@@ -24,6 +24,7 @@ use std::{
 
 mod api;
 mod cache;
+pub mod commit_meter;
 mod config;
 mod engine;
 mod model;

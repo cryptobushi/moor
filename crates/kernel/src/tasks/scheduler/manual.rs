@@ -78,6 +78,7 @@ impl Scheduler {
         };
         let mut jobs_run = 0;
         let mut budget_exhausted = false;
+        let mut limit_cancelled = false;
         loop {
             if !budget_exhausted && jobs_run >= budget {
                 budget_exhausted = true;
@@ -86,8 +87,17 @@ impl Scheduler {
                     task.control.request_cancel();
                 }
             }
+            if !budget_exhausted && crate::tasks::meter::limit_hit() && !limit_cancelled {
+                // A tick limit ended the command: its remaining tasks do not run (ADR 0007).
+                limit_cancelled = true;
+                let lc = self.lifecycle.lock();
+                for task in lc.task_q.active.values() {
+                    task.control.request_cancel();
+                }
+            }
             if queue.run_next() {
                 jobs_run += 1;
+                crate::tasks::meter::add_task();
                 self.drain_immediate_wakes();
                 continue;
             }

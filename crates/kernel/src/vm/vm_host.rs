@@ -229,8 +229,12 @@ impl VmHost {
             return AbortLimit(AbortLimitReason::Time(elapsed));
         }
 
-        // Grant the loop its next tick slice.
+        // Grant the loop its next tick slice, clamped to what the command's ceiling still allows
+        // (RuneWorld ADR 0007: the ceiling spans every task of the command).
         self.vm_exec_state.tick_slice = self.max_ticks - self.vm_exec_state.tick_count;
+        if crate::tasks::meter::remaining() == Some(0) {
+            return AbortLimit(AbortLimitReason::Ticks(self.vm_exec_state.tick_count));
+        }
 
         // Check if we have a pending error to raise (from worker error handling)
         let mut result = if let Some(pending_error) = self.vm_exec_state.pending_raise_error.take()
@@ -481,7 +485,11 @@ impl VmHost {
 
         // Pick the right kind of execution flow depending on the activation -- builtin or MOO?
         let mut tick_count = self.vm_exec_state.tick_count;
-        let tick_slice = self.vm_exec_state.tick_slice;
+        let ticks_at_entry = tick_count;
+        let mut tick_slice = self.vm_exec_state.tick_slice;
+        if let Some(remaining) = crate::tasks::meter::remaining() {
+            tick_slice = tick_slice.min(usize::try_from(remaining).unwrap_or(usize::MAX));
+        }
         let activation = self.vm_exec_state.top_mut();
         let verb_name = activation.verb_name;
         let verb_definer = activation.verb_definer();
@@ -516,6 +524,7 @@ impl VmHost {
             }
         };
         self.vm_exec_state.tick_count = new_tick_count;
+        crate::tasks::meter::add_ticks((new_tick_count - ticks_at_entry) as u64);
 
         result
     }

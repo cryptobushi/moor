@@ -27,7 +27,7 @@ use crate::{
     task_context::{
         current_task_scheduler_client, with_current_transaction, with_current_transaction_mut,
     },
-    tasks::{sched_counters, task_program_cache::program_cache_global_stats},
+    tasks::{meter, sched_counters, task_program_cache::program_cache_global_stats},
     vm::{
         builtins::{
             BfCallState, BfErr,
@@ -58,7 +58,7 @@ use moor_db::{
     ANCESTRY_CACHE_STATS, DatabaseRelation, PROP_CACHE_STATS, VERB_CACHE_STATS, db_counters,
 };
 use moor_var::{
-    Associative, E_ARGS, E_INVARG, E_INVIND, E_QUOTA, E_TYPE, Error, Obj, Symbol, Var,
+    Associative, E_ARGS, E_INVARG, E_INVIND, E_QUOTA, E_TYPE, Error, Obj, SYSTEM_OBJECT, Symbol, Var,
     VarType::TYPE_NONE, v_arc_str, v_float, v_int, v_list, v_list_iter, v_map, v_obj, v_str,
     v_string, v_sym,
 };
@@ -499,6 +499,98 @@ fn bf_block_context(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
         (v_sym("height"), v_int(height as i64)),
         (v_sym("time"), v_int(time as i64)),
         (v_sym("command"), v_int(command as i64)),
+    ])))
+}
+
+/// Usage: `map meter()`
+/// The engine meter of the command being executed, so far (RuneWorld ADR 0007 decision 2):
+/// `['kind, 'world, 'ticks, 'tasks, 'log_bytes, 'events, 'event_bytes, 'objects_created,
+/// 'objects_recycled, 'storage_delta, 'policy_ticks, 'ceiling]`. `'tasks` counts the calling task. `'ceiling` is the command's tick
+/// ceiling, or -1 when unbounded. Ticks count up to the end of the previous interpreter slice, so
+/// they never include the call itself. Outside a block driver every field is zero.
+fn bf_meter(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
+    if !bf_args.args.is_empty() {
+        return Err(ErrValue(E_ARGS.msg("meter() does not take any arguments")));
+    }
+    let int = |n: u64| v_int(i64::try_from(n).unwrap_or(i64::MAX));
+    if !meter::is_active() {
+        let keys = [
+            "ticks",
+            "tasks",
+            "log_bytes",
+            "events",
+            "event_bytes",
+            "objects_created",
+            "objects_recycled",
+            "storage_delta",
+            "policy_ticks",
+        ];
+        let mut pairs: Vec<(Var, Var)> = vec![
+            (v_sym("kind"), v_sym("command")),
+            (v_sym("world"), v_obj(SYSTEM_OBJECT)),
+            (v_sym("ceiling"), v_int(-1)),
+        ];
+        pairs.extend(keys.iter().map(|k| (v_sym(*k), v_int(0))));
+        return Ok(Ret(v_map(&pairs)));
+    }
+    let live = meter::live();
+    let pending = moor_db::commit_meter::peek();
+    Ok(Ret(v_map(&[
+        (v_sym("kind"), v_sym(live.kind.name())),
+        (v_sym("world"), v_obj(Obj::mk_id(live.world))),
+        (v_sym("ticks"), int(live.ticks)),
+        (v_sym("tasks"), int(live.tasks + 1)),
+        (v_sym("log_bytes"), int(live.log_bytes)),
+        (v_sym("events"), int(live.events)),
+        (v_sym("event_bytes"), int(live.event_bytes)),
+        (v_sym("objects_created"), int(pending.created)),
+        (v_sym("objects_recycled"), int(pending.recycled)),
+        (v_sym("storage_delta"), v_int(pending.total())),
+        (v_sym("policy_ticks"), int(live.policy_ticks)),
+        (
+            v_sym("ceiling"),
+            live.ceiling.map_or(v_int(-1), |c| int(c)),
+        ),
+    ])))
+}
+
+/// Usage: `map meter_totals(obj world, symbol scope)`
+/// What `world` has been charged in the open block, summed over its inputs so far (RuneWorld ADR
+/// 0007 decision 2): `['inputs, 'ticks, 'tasks, 'log_bytes, 'events, 'event_bytes,
+/// 'objects_created, 'objects_recycled, 'storage_delta, 'policy_ticks, 'denied, 'aborted,
+/// 'tick_ceiling]`. `scope` must be `'block`. The totals include inputs that ended before the
+/// calling command, not the calling command itself. Zeros for a world charged nothing, and
+/// outside a block driver.
+fn bf_meter_totals(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
+    let Some(world) = bf_args.args[0].as_object() else {
+        return Err(ErrValue(E_TYPE.msg("meter_totals() needs a world object")));
+    };
+    let scope = bf_args.args[1].as_symbol().map_err(ErrValue)?;
+    if scope.as_str() != "block" {
+        return Err(ErrValue(
+            E_INVARG.msg("meter_totals() scope must be 'block"),
+        ));
+    }
+    let t = if world.is_oid() {
+        meter::block_totals(world.id().0)
+    } else {
+        meter::WorldTotals::default()
+    };
+    let int = |n: u64| v_int(i64::try_from(n).unwrap_or(i64::MAX));
+    Ok(Ret(v_map(&[
+        (v_sym("inputs"), int(t.inputs)),
+        (v_sym("ticks"), int(t.ticks)),
+        (v_sym("tasks"), int(t.tasks)),
+        (v_sym("log_bytes"), int(t.log_bytes)),
+        (v_sym("events"), int(t.events)),
+        (v_sym("event_bytes"), int(t.event_bytes)),
+        (v_sym("objects_created"), int(t.objects_created)),
+        (v_sym("objects_recycled"), int(t.objects_recycled)),
+        (v_sym("storage_delta"), v_int(t.storage_delta)),
+        (v_sym("policy_ticks"), int(t.policy_ticks)),
+        (v_sym("denied"), int(t.denied)),
+        (v_sym("aborted"), int(t.aborted)),
+        (v_sym("tick_ceiling"), int(t.tick_ceiling)),
     ])))
 }
 
@@ -1590,6 +1682,8 @@ pub(crate) fn register_bf_server(builtins: &mut [BuiltinFunction]) {
     builtins[offset_for_builtin("ftime")] = bf_ftime;
     builtins[offset_for_builtin("ctime")] = bf_ctime;
     builtins[offset_for_builtin("block_context")] = bf_block_context;
+    builtins[offset_for_builtin("meter")] = bf_meter;
+    builtins[offset_for_builtin("meter_totals")] = bf_meter_totals;
     builtins[offset_for_builtin("raise")] = bf_raise;
     builtins[offset_for_builtin("server_version")] = bf_server_version;
     builtins[offset_for_builtin("shutdown")] = bf_shutdown;

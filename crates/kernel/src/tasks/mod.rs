@@ -67,7 +67,9 @@ pub type BatchResultSink = std::sync::Arc<
 
 pub mod block_driver;
 pub mod block_events;
+pub mod charge;
 pub mod envelope_admission;
+pub mod meter;
 pub mod scheduler;
 pub mod sequencer;
 pub mod sequencer_recovery;

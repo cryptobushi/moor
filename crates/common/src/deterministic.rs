@@ -114,7 +114,18 @@ pub struct DeterministicMode {
     /// once one is defined (S0-5). All zero until then. Written as 64 hex digits.
     #[serde(with = "hex_seed")]
     pub domain_salt: [u8; 32],
+    /// Engine safety ceiling on the ticks one input may use across all its tasks (ADR 0007
+    /// decision 1: a deployment parameter, identical for every world). Zero means the default.
+    pub max_command_ticks: u64,
+    /// Fixed ceiling on the ticks of the charge hook at `'reserve` (ADR 0007 decision 3).
+    /// Zero means the default.
+    pub max_policy_ticks: u64,
 }
+
+/// Default of [`DeterministicMode::max_command_ticks`].
+pub const DEFAULT_MAX_COMMAND_TICKS: u64 = 1_000_000;
+/// Default of [`DeterministicMode::max_policy_ticks`].
+pub const DEFAULT_MAX_POLICY_TICKS: u64 = 20_000;
 
 impl DeterministicMode {
     /// Deterministic mode starting in the all-zero block context.
@@ -124,6 +135,28 @@ impl DeterministicMode {
             enabled: true,
             genesis: BlockContext::default(),
             domain_salt: [0; 32],
+            max_command_ticks: 0,
+            max_policy_ticks: 0,
+        }
+    }
+
+    /// The engine maximum ticks per command, with the default applied.
+    #[must_use]
+    pub fn command_tick_maximum(&self) -> u64 {
+        if self.max_command_ticks == 0 {
+            DEFAULT_MAX_COMMAND_TICKS
+        } else {
+            self.max_command_ticks
+        }
+    }
+
+    /// The fixed ceiling on charge hook ticks, with the default applied.
+    #[must_use]
+    pub fn policy_tick_maximum(&self) -> u64 {
+        if self.max_policy_ticks == 0 {
+            DEFAULT_MAX_POLICY_TICKS
+        } else {
+            self.max_policy_ticks
         }
     }
 
