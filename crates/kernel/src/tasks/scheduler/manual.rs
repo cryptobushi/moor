@@ -129,8 +129,9 @@ impl Scheduler {
     }
 
     /// Start the scheduler with an external block driver and no service threads. Only valid in
-    /// deterministic mode. Client requests are refused afterwards: every input goes through the
-    /// returned driver.
+    /// deterministic mode. Client requests that would run work are refused afterwards: every input
+    /// goes through the returned driver. `SchedulerClient` reads (world-state queries, status) keep
+    /// working on the caller's thread against the last committed state, without a command index.
     pub fn start_block_driver(
         &self,
         bg_session_factory: Arc<dyn SessionFactory>,
@@ -141,6 +142,7 @@ impl Scheduler {
         // Dropping the receiver makes `enqueue_client_request` fail instead of queueing work
         // that nothing would serve.
         drop(self.take_client_request_recv()?);
+        self.sequencer_owned.store(true, Ordering::Release);
         self.restore_tasks(bg_session_factory);
         self.lifecycle.lock().state = SchedulerState::Running;
         info!("Scheduler started under an external block driver (deterministic mode)");

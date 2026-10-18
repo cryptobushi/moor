@@ -72,6 +72,7 @@ harness = false
 
 [dependencies]
 # Internal Dependencies
+moor-block = { path = "../block" }
 moor-builtin-docs-macro = { path = "../builtin-docs-macro" }
 moor-common = { path = "../common" }
 moor-compiler = { path = "../compiler" }

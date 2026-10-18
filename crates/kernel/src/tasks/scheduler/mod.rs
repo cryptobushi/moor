@@ -140,6 +140,11 @@ pub struct Scheduler {
     /// nonce into, handed to the next new task dispatched (the envelope's command or connect
     /// task), so admission commits with that task instead of in a transaction of its own.
     pub(crate) preopened_tx: Arc<Mutex<Option<Box<dyn WorldState>>>>,
+
+    /// Deterministic mode only: set while an external sequencer owns the block driver. Client
+    /// requests are then refused, and `SchedulerClient` reads run on the caller's thread against
+    /// the last committed state.
+    pub(crate) sequencer_owned: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Scheduler {
@@ -246,6 +251,7 @@ impl Scheduler {
             manual_queue,
             deterministic_conflicts: Arc::new(AtomicU64::new(0)),
             preopened_tx: Arc::new(Mutex::new(None)),
+            sequencer_owned: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
 
         s.reload_server_options();

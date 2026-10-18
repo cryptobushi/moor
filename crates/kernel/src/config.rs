@@ -36,6 +36,40 @@ pub struct Config {
     /// any of them on is non-publishing: its inputs are not a valid log.
     #[serde(default)]
     pub dev: DevShortcuts,
+    /// RuneWorld sequencer mode (ADR 0006): the daemon drives blocks itself. Needs deterministic
+    /// mode.
+    #[serde(default)]
+    pub sequencer: SequencerConfig,
+}
+
+/// RuneWorld sequencer mode (ADR 0006 decisions 1-2). Every key is always present so that the
+/// daemon's configuration loader accepts the section.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SequencerConfig {
+    /// Run the block loop: one input queue, 1 s blocks, sealed and published.
+    pub enabled: bool,
+    /// File holding the sequencer's secp256k1 secret as 64 hex digits (S1-2 replaces this with a
+    /// signing guard).
+    pub key_file: Option<PathBuf>,
+    /// Directory of the `FileSink` the sealed blocks are published to.
+    pub sink_dir: Option<PathBuf>,
+    /// Blocks per published segment.
+    pub segment_blocks: usize,
+    /// Development identity only: the player the `--dev-identity` wallet is bound to at genesis.
+    pub dev_player: Option<i32>,
+}
+
+impl Default for SequencerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            key_file: None,
+            sink_dir: None,
+            segment_blocks: 10,
+            dev_player: None,
+        }
+    }
 }
 
 /// Development shortcuts for deterministic mode (RuneWorld ADR 0005 decision 8). Off by default;

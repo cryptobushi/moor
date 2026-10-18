@@ -165,6 +165,13 @@ impl SchedulerClient {
         }
     }
 
+    /// True while an external sequencer owns the block driver (RuneWorld sequencer mode). Reads
+    /// then run on the caller's thread against the last committed state and take no command
+    /// index; every other client request is refused, since only logged inputs may change state.
+    fn sequencer_owned(&self) -> bool {
+        self.scheduler.sequencer_owned.load(Ordering::Acquire)
+    }
+
     fn ensure_running(&self) -> Result<(), SchedulerError> {
         if self.scheduler.state() != SchedulerState::Running {
             return Err(SchedulerError::SchedulerNotResponding);
@@ -572,11 +579,17 @@ impl SchedulerClient {
 
     /// Check if the scheduler is alive and responding (lightweight operation)
     pub fn check_status(&self) -> Result<(), SchedulerError> {
+        if self.sequencer_owned() {
+            return self.scheduler.handle_check_status();
+        }
         self.request_with_timeout(DEFAULT_REQUEST_TIMEOUT, Scheduler::handle_check_status)
     }
 
     /// Get garbage collection statistics from the scheduler
     pub fn get_gc_stats(&self) -> Result<GCStats, SchedulerError> {
+        if self.sequencer_owned() {
+            return self.scheduler.handle_get_gc_stats();
+        }
         self.request_with_timeout(DEFAULT_REQUEST_TIMEOUT, Scheduler::handle_get_gc_stats)
     }
 
@@ -710,6 +723,25 @@ impl SchedulerClient {
         actions: Vec<WorldStateRequest>,
         rollback: bool,
     ) -> Result<Vec<WorldStateResponse>, SchedulerError> {
+        if self.sequencer_owned() {
+            // Sequencer mode: a read runs here, in a transaction that is always rolled back, so it
+            // consumes no command index and cannot change state. Writes must be logged inputs.
+            let writes = actions.iter().any(|request| {
+                matches!(
+                    request.action,
+                    WorldStateAction::ProgramVerb { .. } | WorldStateAction::UpdateProperty { .. }
+                )
+            });
+            if writes {
+                return Err(SchedulerError::CommandExecutionError(
+                    moor_common::tasks::CommandError::PermissionDenied,
+                ));
+            }
+            self.ensure_running()?;
+            return self
+                .scheduler
+                .execute_world_state_actions_inner(actions, true);
+        }
         self.request_with_timeout(DEFAULT_REQUEST_TIMEOUT, move |scheduler| {
             scheduler.execute_world_state_actions_inner(actions, rollback)
         })

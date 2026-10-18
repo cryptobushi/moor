@@ -56,7 +56,7 @@
 
 use crate::tasks::{
     TaskHandle,
-    envelope_admission::{AdmissionRejection, Admitted, take_result},
+    envelope_admission::{AdmissionRejection, Admitted, OnAdmitted, take_result},
     scheduler::Scheduler,
 };
 use moor_common::model::WorldStateError;
@@ -429,12 +429,23 @@ impl BlockDriver {
     /// Submit one signed envelope (wire bytes) and run it to quiescence. Output goes to the batch
     /// and to `inner`. Admission, rejection and session events are described in the module docs.
     pub fn submit_envelope(&mut self, bytes: &[u8], inner: Arc<dyn Session>) -> &InputOutcome {
+        self.submit_envelope_with(bytes, inner, None)
+    }
+
+    /// [`Self::submit_envelope`] with a callback run after admission and before the envelope's
+    /// task (the daemon binds a connecting host's connection there).
+    pub fn submit_envelope_with(
+        &mut self,
+        bytes: &[u8],
+        inner: Arc<dyn Session>,
+        on_admitted: Option<OnAdmitted>,
+    ) -> &InputOutcome {
         let session = self.session(inner);
         self.scheduler.begin_sequenced_input();
         let command_index = deterministic::current().map_or(0, |ctx| ctx.command);
         let run = self
             .scheduler
-            .run_envelope(bytes, session, None, self.job_budget);
+            .run_envelope(bytes, session, on_admitted, self.job_budget);
         // Drain anything the envelope's tasks left queued (forks, wakes).
         let tail = self.scheduler.run_until_quiescent(self.job_budget);
         let summary = RunSummary {
@@ -535,6 +546,18 @@ impl BlockDriver {
     #[must_use]
     pub fn events(&self) -> Vec<BlockEvent> {
         lock(&self.batch).events.clone()
+    }
+
+    /// How many events this block's batch holds so far.
+    #[must_use]
+    pub fn event_count(&self) -> usize {
+        lock(&self.batch).events.len()
+    }
+
+    /// The context of the current (or last) block.
+    #[must_use]
+    pub fn block(&self) -> BlockContext {
+        self.block
     }
 
     /// End the block: cancel any task still suspended, and return the outcomes and event batch.
