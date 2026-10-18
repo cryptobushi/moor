@@ -17,6 +17,7 @@ pub(crate) mod codec;
 mod djot_formatter;
 mod moo_highlighter;
 mod protocol;
+pub(crate) mod runeworld;
 pub(crate) mod telnet;
 
 use std::{
@@ -163,6 +164,15 @@ pub(crate) struct TelnetConnection {
     /// When the host started, Unix seconds (MSSP `UPTIME`).
     pub(crate) host_started_at: u64,
     pub(crate) host_id: Uuid,
+    /// RuneWorld: source offer, heights and the host's custodial session key (ADR 0005).
+    pub(crate) runeworld: Arc<runeworld::RuneWorldHost>,
+    /// Logged in through a signed `connect`: every line is a signed envelope.
+    pub(crate) signed_session: bool,
+    /// A delegation printed by `link`, waiting for the wallet's signature.
+    pub(crate) pending_link: Option<(
+        moor_common::envelope::Delegation,
+        moor_common::envelope::Address,
+    )>,
 }
 
 /// The input modes the telnet session can be in.
@@ -923,6 +933,7 @@ impl TelnetConnection {
             )
             .await
             .with_context(|| "Unable to send login request to RPC server")?;
+        self.rw_banner().await?;
 
         let (auth_token, player, connect_type) = self
             .authorization_phase()
@@ -974,6 +985,7 @@ impl TelnetConnection {
                     match event_msg.event {
                         BroadcastEvent::SealNotice { height, header_hash, state_root } => {
                             // RuneWorld sequencer mode: a block was sealed (ADR 0006).
+                            self.runeworld.note_seal(height);
                             debug!(
                                 height,
                                 header_hash = %hex_bytes(&header_hash),
@@ -1060,6 +1072,17 @@ impl TelnetConnection {
                         }
                         ConnectionItem::Bytes(_) => continue,
                     };
+                    match self.rw_login_line(&line).await? {
+                        runeworld::LoginStep::NotMine => {}
+                        runeworld::LoginStep::Handled => {
+                            self.flush().await?;
+                            continue;
+                        }
+                        runeworld::LoginStep::LoggedIn(auth_token, player) => {
+                            self.player_object = Some(player);
+                            return Ok((auth_token, player, ApiConnectType::Connected));
+                        }
+                    }
                     let words = parse_into_words(&line);
                     let reply = self.daemon_client.client_call(
                         self.client_id,
@@ -1070,7 +1093,21 @@ impl TelnetConnection {
                             do_attach: true,
                             registration_data: None,
                         },
-                    ).await?;
+                    ).await;
+                    let reply = match reply {
+                        Ok(reply) => reply,
+                        Err(moor_runtime_api::RpcError::Daemon(e)) => {
+                            // Deterministic mode refuses password logins without --dev-identity.
+                            let hint = if self.runeworld.signer().is_some() {
+                                " This world takes signed logins: `connect` (or `link <0xwallet>`)."
+                            } else {
+                                ""
+                            };
+                            self.send_line(&format!("Login refused: {e}.{hint}")).await?;
+                            continue;
+                        }
+                        Err(e) => return Err(e.into()),
+                    };
 
                     if let ClientReply::LoginResult { success: true, auth_token: Some(auth_token), connect_type, player: Some(player), .. } = reply {
                         info!(?player, client_id = ?self.client_id, "Login successful");
@@ -1177,6 +1214,7 @@ impl TelnetConnection {
                     match event_msg.event {
                         BroadcastEvent::SealNotice { height, header_hash, state_root } => {
                             // RuneWorld sequencer mode: a block was sealed (ADR 0006).
+                            self.runeworld.note_seal(height);
                             debug!(
                                 height,
                                 header_hash = %hex_bytes(&header_hash),
@@ -1719,6 +1757,12 @@ impl TelnetConnection {
                     },
                 )
                 .await
+        } else if self.signed_session {
+            let line = line.trim().to_string();
+            if line.is_empty() {
+                return Ok(());
+            }
+            return self.rw_signed_command(line).await;
         } else {
             let line = line.trim().to_string();
 

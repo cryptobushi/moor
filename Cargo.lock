@@ -4808,6 +4808,7 @@ dependencies = [
  "moor-var",
  "moor-zmq-client",
  "r0z-async",
+ "rand 0.10.3",
  "regex",
  "serde",
  "serde_json",

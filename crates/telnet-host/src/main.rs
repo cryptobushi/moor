@@ -96,6 +96,17 @@ struct Args {
     #[command(flatten)]
     #[serde(default)]
     protocols: TelnetProtocolConfig,
+
+    /// RuneWorld: the host's custodial Ed25519 session keyfile, created on first start. Logins
+    /// then use `link <0xwallet>`, `sign <0xsignature>` and `connect` (signed envelopes).
+    #[arg(long, value_name = "session-keyfile")]
+    #[serde(default)]
+    session_keyfile: Option<PathBuf>,
+
+    /// RuneWorld: link page URL printed by `link` (default: the bridge host's page).
+    #[arg(long, value_name = "link-url")]
+    #[serde(default)]
+    link_url: Option<String>,
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -141,6 +152,8 @@ async fn main() -> Result<(), eyre::Error> {
             tls_cert: args.tls_cert,
             tls_key: args.tls_key,
             protocols: args.protocols,
+            session_keyfile: args.session_keyfile,
+            link_url: args.link_url,
         },
     };
     let runtime = HostRuntime {

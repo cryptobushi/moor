@@ -75,6 +75,7 @@ regex.workspace = true
 tabled.workspace = true
 
 # Utilities & Helpers
+rand.workspace = true
 urlencoding.workspace = true
 uuid.workspace = true
 

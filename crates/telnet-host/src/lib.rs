@@ -59,6 +59,11 @@ pub struct TelnetHostConfig {
     pub tls_key: Option<PathBuf>,
     /// Out-of-band telnet protocols; all off by default.
     pub protocols: TelnetProtocolConfig,
+    /// RuneWorld: the host's custodial session keyfile (created if missing). When set, `link`,
+    /// `sign` and `connect` log in with signed envelopes (ADR 0005 decision 6).
+    pub session_keyfile: Option<PathBuf>,
+    /// RuneWorld: the link page printed by `link` (defaults to the bridge host's).
+    pub link_url: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -127,7 +132,21 @@ async fn run_with_host_services(
         .unwrap_or_default();
     let (feature_sender, boolean_returns) =
         watch::channel((!config.protocols.gmcp).then_some(false));
+    let runeworld = Arc::new(
+        session::runeworld::RuneWorldHost::new(
+            config.session_keyfile.as_deref(),
+            config.link_url.clone(),
+        )
+        .map_err(|e| eyre!("RuneWorld session keyfile: {e}"))?,
+    );
+    if let Some(signer) = runeworld.signer() {
+        info!(
+            session_key = %moor_common::envelope::hex(&signer.public_key()),
+            "RuneWorld signing host: custodial session key loaded"
+        );
+    }
     let settings = SessionSettings {
+        runeworld,
         host_id,
         protocols: Arc::new(config.protocols.clone()),
         boolean_returns,

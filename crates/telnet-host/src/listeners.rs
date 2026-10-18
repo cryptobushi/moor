@@ -117,6 +117,8 @@ pub struct SessionSettings {
     pub boolean_returns: tokio::sync::watch::Receiver<Option<bool>>,
     /// When the host started, in Unix seconds (MSSP `UPTIME`).
     pub started_at: u64,
+    /// RuneWorld host state shared by every connection.
+    pub runeworld: Arc<crate::session::runeworld::RuneWorldHost>,
 }
 
 pub struct Listeners {
@@ -439,6 +441,9 @@ impl Listener {
                 client_data_limiter,
                 host_started_at,
                 host_id: settings.host_id,
+                runeworld: settings.runeworld.clone(),
+                signed_session: false,
+                pending_link: None,
             };
 
             tcp_connection.run().await?;

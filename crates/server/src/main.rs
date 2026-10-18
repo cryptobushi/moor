@@ -534,6 +534,9 @@ async fn run() -> Result<(), Report> {
             tls_cert: services_config.telnet.tls_cert,
             tls_key: services_config.telnet.tls_key,
             protocols: services_config.telnet.protocols,
+            // RuneWorld signing is a separate-host feature; the combined server sets no shortcut.
+            session_keyfile: None,
+            link_url: None,
         };
         let telnet_runtime = TelnetHostRuntime {
             kill_switch: kill_switch.clone(),
