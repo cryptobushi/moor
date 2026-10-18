@@ -218,6 +218,16 @@ pub trait Database: Send + Sync + WorldStateSource {
             "Storage engine does not support canonical dumps".to_string(),
         ))
     }
+
+    /// Hold the latest committed state for a checkpoint (`state_root::checkpoint`). O(1); take it
+    /// at a quiescent point, such as a block boundary, and encode it later.
+    fn capture_checkpoint(
+        &self,
+    ) -> Result<state_root::checkpoint::CheckpointCapture, WorldStateError> {
+        Err(WorldStateError::DatabaseError(
+            "Storage engine does not support checkpoints".to_string(),
+        ))
+    }
 }
 
 #[derive(Clone)]
@@ -238,6 +248,15 @@ impl TxDB {
     /// Call this after bulk import operations to enable optimized reads.
     pub fn mark_all_fully_loaded(&self) {
         self.storage.mark_all_fully_loaded();
+    }
+
+    /// Restore a verified checkpoint into this database, which must be empty (freshly opened).
+    /// When this returns, Fjall holds the restored state and its root is the checkpoint's.
+    pub fn import_checkpoint(
+        &self,
+        checkpoint: &state_root::checkpoint::Checkpoint<'_>,
+    ) -> Result<state_root::StateRoot, state_root::checkpoint::CheckpointError> {
+        self.storage.restore_checkpoint(checkpoint)
     }
 
     /// Wait until the current published state has been committed into Fjall.
@@ -330,5 +349,11 @@ impl Database for TxDB {
         self.storage
             .canonical_relation(name)
             .map_err(|e| WorldStateError::DatabaseError(e.to_string()))
+    }
+
+    fn capture_checkpoint(
+        &self,
+    ) -> Result<state_root::checkpoint::CheckpointCapture, WorldStateError> {
+        Ok(self.storage.capture_checkpoint())
     }
 }

@@ -317,6 +317,15 @@ impl AnonymousObjectMetadata {
         })
     }
 
+    /// Metadata with the given times, in microseconds since the Unix epoch (checkpoint restore).
+    #[must_use]
+    pub fn from_micros(created_micros: u128, last_accessed_micros: u128) -> Self {
+        Self {
+            created_micros,
+            last_accessed_micros,
+        }
+    }
+
     pub fn created_time(&self) -> std::time::SystemTime {
         let dur = std::time::Duration::from_micros(self.created_micros as u64);
         std::time::UNIX_EPOCH + dur

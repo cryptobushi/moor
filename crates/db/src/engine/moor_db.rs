@@ -57,6 +57,7 @@ use tempfile::TempDir;
 use tracing::{error, info};
 use uuid::Uuid;
 
+mod checkpoint_restore;
 mod property_policy;
 mod snapshot_planes;
 
@@ -163,6 +164,19 @@ impl SequenceState {
         self.values[sequence].load(Ordering::Relaxed)
     }
 
+    /// Every sequence's current value, in slot order.
+    pub(crate) fn values(&self) -> [i64; SEQUENCE_COUNT] {
+        std::array::from_fn(|i| self.load(i))
+    }
+
+    /// Set every sequence (checkpoint restore) and mark them all for persistence.
+    fn restore(&self, values: &[i64; SEQUENCE_COUNT]) {
+        for (i, value) in values.iter().enumerate() {
+            self.values[i].store(*value, Ordering::Relaxed);
+            self.mark_dirty(i);
+        }
+    }
+
     pub(crate) fn increment(&self, sequence: usize) -> i64 {
         let value = self.values[sequence].fetch_add(1, Ordering::Relaxed) + 1;
         self.mark_dirty(sequence);
@@ -200,7 +214,7 @@ pub struct MoorDB {
     keyspace: Database,
     relations: Relations,
     snapshot_planes: SnapshotPlanes,
-    sequences: Arc<SequenceState>,
+    pub(crate) sequences: Arc<SequenceState>,
     sequences_partition: fjall::Keyspace,
     /// Single background writer for all fjall operations
     batch_writer: BatchWriter,

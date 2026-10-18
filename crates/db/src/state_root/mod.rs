@@ -30,6 +30,7 @@
 //! if the database defines a relation this list does not cover.
 
 pub mod cbor;
+pub mod checkpoint;
 pub mod values;
 
 use crate::engine::moor_db::{SEQUENCE_COUNT, SequenceState, WorldStateSnapshot};
@@ -315,6 +316,15 @@ pub(crate) fn canonical_relation(
     sequences: &SequenceState,
     name: &str,
 ) -> Result<CanonicalRelation, StateRootError> {
+    canonical_relation_from(snapshot, &sequences.values(), name)
+}
+
+/// Encode one relation of `snapshot`, or the sequences from their values.
+pub(crate) fn canonical_relation_from(
+    snapshot: &WorldStateSnapshot,
+    sequences: &[i64; SEQUENCE_COUNT],
+    name: &str,
+) -> Result<CanonicalRelation, StateRootError> {
     let s = snapshot;
     match name {
         "object_location" => entries(
@@ -394,7 +404,7 @@ pub(crate) fn canonical_relation(
                     let mut k = Encoder::new();
                     k.uint(i as u64);
                     let mut v = Encoder::new();
-                    v.int(sequences.load(i));
+                    v.int(sequences[i]);
                     (k.into_bytes(), v.into_bytes())
                 })
                 .collect();
@@ -562,9 +572,10 @@ pub(crate) fn state_root(
     snapshot: &WorldStateSnapshot,
     sequences: &SequenceState,
 ) -> Result<StateRoot, StateRootError> {
+    let sequences = sequences.values();
     let relations = RELATIONS
         .iter()
-        .map(|name| canonical_relation(snapshot, sequences, name).map(|r| r.digest()))
+        .map(|name| canonical_relation_from(snapshot, &sequences, name).map(|r| r.digest()))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(StateRoot::from_relations(relations))
 }
