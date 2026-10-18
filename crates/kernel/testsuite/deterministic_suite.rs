@@ -3412,3 +3412,1059 @@ mod sequencer {
         seq.shutdown().unwrap();
     }
 }
+
+// --- Journal, seal persistence, signing guard and crash recovery (S1-2) ---------------------
+
+/// S1-2: ADR 0006 decision 4. The kill tests run the sequencer in child processes of this test
+/// binary (`durability::kill_child`) on an on-disk database, kill them with `kill -9` at each
+/// phase of a block, restart them, and compare the recovered chain with an uninterrupted run byte
+/// for byte (FileSink segments and index, block store, signing guard), and the events hosts saw
+/// with the events the chain records.
+#[cfg(unix)]
+mod durability {
+    use std::{
+        collections::BTreeMap,
+        fs,
+        io::Write as _,
+        os::unix::process::ExitStatusExt as _,
+        path::{Path, PathBuf},
+        process::Command,
+        sync::{
+            Arc, Mutex as StdMutex,
+            atomic::{AtomicBool, Ordering},
+        },
+        time::{Duration, Instant},
+    };
+
+    use moor_block::{
+        ChainTip, CommandEntry, DaSink, EventPolicy, FileSink, SealedBlock, Segment, SequencerKey,
+        durable::{BlockStore, Journal, SigningGuard, StoreChain},
+        hex,
+    };
+    use moor_common::{
+        deterministic::{self, DeterministicMode},
+        envelope::scope,
+        tasks::{NarrativeEvent, NoopClientSession, NoopSystemControl, Session, SessionError},
+    };
+    use moor_db::{Database, DatabaseConfig, TxDB};
+    use moor_kernel::{
+        config::Config,
+        tasks::{
+            NoopTasksDb,
+            block_driver::{BlockDriver, BlockEventKind, BlockInput},
+            block_events,
+            scheduler::Scheduler,
+            sequencer::{SequencerError, SequencerParams},
+            sequencer_recovery::{
+                DurableHooks, DurableParts, FaultHook, FaultPoint, FsyncLog, RecoveryError,
+                database_resumable, resume,
+            },
+        },
+    };
+    use moor_var::{Obj, Var, v_int};
+
+    use super::LOCK;
+    use super::admission::{GENESIS, command, delegate, delegation, key, wallet};
+    use super::executor::{Factory, block as genesis_context};
+
+    const WIZARD: Obj = Obj::mk_id(3);
+    const T0: u64 = 1_700_000_100;
+    /// Blocks per run; the last takes whatever inputs are left.
+    const BLOCKS: u64 = 8;
+    /// Planned inputs per block (the script has 11).
+    const PLANNED: [usize; 8] = [1, 2, 0, 3, 1, 0, 2, 2];
+    /// The player the delegation creates (deterministic object ids).
+    const PLAYER_ENV: &str = "RW_KILL_PLAYER";
+
+    /// A verb whose input commits twice (its `fork (0)` child is a second task), so a kill
+    /// between the commits leaves hosts with half of the input's events.
+    const CHAT: &str = r#"
+        add_verb(#0.wallet_parent, {player, "rxd", "chat"}, {"any", "any", "any"});
+        set_verb_code(#0.wallet_parent, "chat", {"notify(player, \"a \" + argstr);", "fork (0)", "notify(player, \"b \" + argstr);", "endfork"});
+        return 1;
+    "#;
+
+    fn sequencer_key() -> SequencerKey {
+        SequencerKey::from_secret(&[0x11; 32]).expect("valid secret")
+    }
+
+    fn noop() -> Arc<dyn Session> {
+        Arc::new(NoopClientSession::new())
+    }
+
+    /// The fixed input script: a delegation creating the player, then ten commands.
+    fn script(player: Obj) -> Vec<CommandEntry> {
+        let mut entries = vec![CommandEntry::Envelope(
+            delegate(
+                &wallet(1),
+                &key(1),
+                delegation(&key(1), 1, true, scope::PLAY),
+            )
+            .encode(),
+        )];
+        let texts = [
+            "ping one",
+            "chat two",
+            "ping three",
+            "chat four",
+            "ping five",
+            "chat six",
+            "ping seven",
+            "chat eight",
+            "ping nine",
+            "chat ten",
+        ];
+        for (i, text) in texts.iter().enumerate() {
+            entries.push(CommandEntry::Envelope(
+                command(&key(1), player, 1, i as u32 + 1, text).encode(),
+            ));
+        }
+        entries
+    }
+
+    fn open_db(dir: &Path) -> (TxDB, bool) {
+        TxDB::try_open(Some(dir), DatabaseConfig::default()).expect("open database")
+    }
+
+    /// Recovery step 1: keep the database only if its root is a sealed block's (or the stored
+    /// unsigned block's); otherwise rebuild it at genesis (no checkpoint import yet).
+    fn prepare_db(dir: &Path, store: &BlockStore) -> (TxDB, bool, bool) {
+        let (db, fresh) = open_db(dir);
+        if fresh || store.chain().is_none() {
+            return (db, fresh, false);
+        }
+        let root = db.state_root().expect("state root").root;
+        if database_resumable(store, &root) {
+            return (db, false, false);
+        }
+        drop(db);
+        fs::remove_dir_all(dir).expect("remove database");
+        let (db, fresh) = open_db(dir);
+        assert!(fresh, "a removed database reopens fresh");
+        (db, true, true)
+    }
+
+    /// A deterministic scheduler under a block driver; at genesis (`fresh`) the textdump, the
+    /// signed-world hooks and `chat` are loaded as block 0.
+    fn start_driver(db: TxDB, fresh: bool) -> BlockDriver {
+        if fresh {
+            crate::common::load_textdump(&db);
+        }
+        let mode = DeterministicMode::on();
+        let scheduler = Scheduler::new(
+            semver::Version::new(0, 1, 0),
+            Box::new(db),
+            Box::new(NoopTasksDb {}),
+            Arc::new(Config {
+                deterministic: mode,
+                ..Config::default()
+            }),
+            Arc::new(NoopSystemControl::default()),
+            None,
+            None,
+        );
+        let mut driver = scheduler
+            .start_block_driver(Arc::new(Factory))
+            .expect("start block driver");
+        if fresh {
+            let inputs = [GENESIS, CHAT]
+                .iter()
+                .map(|code| {
+                    (
+                        BlockInput::Eval {
+                            player: WIZARD,
+                            code: (*code).to_string(),
+                        },
+                        noop(),
+                    )
+                })
+                .collect();
+            let out = driver.run_block(genesis_context(0), inputs);
+            for outcome in &out.outcomes {
+                assert!(
+                    matches!(outcome.result, Some(Ok(_))),
+                    "genesis failed: {:?}",
+                    outcome.result
+                );
+            }
+        }
+        driver
+    }
+
+    fn kill_now() -> ! {
+        let _ = Command::new("kill")
+            .args(["-9", &std::process::id().to_string()])
+            .status();
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    }
+
+    /// Where a child kills itself.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Crash {
+        /// After the first commit of input `index` of block `height` reached its host.
+        MidInput { height: u64, index: u64 },
+        /// At a durability fault point.
+        Fault(FaultPoint),
+        /// At a durability fault point, after giving the database a second to persist.
+        Settled(FaultPoint),
+        /// After the segment ending at `height` is published.
+        Published { height: u64 },
+    }
+
+    fn parse_crash(spec: &str) -> Option<Crash> {
+        if let Some(rest) = spec.strip_prefix("settled-") {
+            return match parse_crash(rest)? {
+                Crash::Fault(point) => Some(Crash::Settled(point)),
+                other => panic!("only fault points settle: {other:?}"),
+            };
+        }
+        let parts: Vec<&str> = spec.split(':').collect();
+        let n = |i: usize| -> u64 { parts[i].parse().expect("crash spec number") };
+        Some(match parts.first().copied()? {
+            "" => return None,
+            "mid" => Crash::MidInput {
+                height: n(1),
+                index: n(2),
+            },
+            "opened" => Crash::Fault(FaultPoint::Opened { height: n(1) }),
+            "journal" => Crash::Fault(FaultPoint::InputsJournalled {
+                height: n(1),
+                last_index: n(2),
+            }),
+            "unsigned" => Crash::Fault(FaultPoint::UnsignedStored { height: n(1) }),
+            "guard" => Crash::Fault(FaultPoint::GuardRecorded { height: n(1) }),
+            "signed" => Crash::Fault(FaultPoint::SignatureStored { height: n(1) }),
+            "published" => Crash::Published { height: n(1) },
+            other => panic!("unknown crash spec {other}"),
+        })
+    }
+
+    /// A host connection: committed narrative events are appended to the `seen` file as
+    /// `height index recipient hex(event)`, the bytes the event batch holds for them.
+    struct Recorder {
+        seen: Arc<StdMutex<fs::File>>,
+        height: u64,
+        index: u64,
+        buf: StdMutex<Vec<(Obj, Box<NarrativeEvent>)>>,
+        /// Kill the process right after the next commit that delivers events.
+        armed: Arc<AtomicBool>,
+    }
+
+    impl Session for Recorder {
+        fn commit(&self) -> Result<(), SessionError> {
+            let events = std::mem::take(&mut *self.buf.lock().unwrap());
+            if events.is_empty() {
+                return Ok(());
+            }
+            let mut out = self.seen.lock().unwrap();
+            for (player, event) in events {
+                let bytes = block_events::encode_event(&BlockEventKind::Narrative(event))
+                    .expect("encode event");
+                writeln!(
+                    out,
+                    "{} {} {} {}",
+                    self.height,
+                    self.index,
+                    player.id().0,
+                    hex(&bytes)
+                )
+                .expect("write seen");
+            }
+            out.flush().expect("flush seen");
+            if self.armed.swap(false, Ordering::AcqRel) {
+                kill_now();
+            }
+            Ok(())
+        }
+        fn rollback(&self) -> Result<(), SessionError> {
+            self.buf.lock().unwrap().clear();
+            Ok(())
+        }
+        fn fork(self: Arc<Self>) -> Result<Arc<dyn Session>, SessionError> {
+            Ok(Arc::new(Recorder {
+                seen: self.seen.clone(),
+                height: self.height,
+                index: self.index,
+                buf: StdMutex::new(vec![]),
+                armed: self.armed.clone(),
+            }))
+        }
+        fn request_input(
+            &self,
+            _: Obj,
+            _: uuid::Uuid,
+            _: Option<Vec<(moor_var::Symbol, Var)>>,
+        ) -> Result<(), SessionError> {
+            Err(SessionError::DeliveryError)
+        }
+        fn send_event(&self, player: Obj, event: Box<NarrativeEvent>) -> Result<(), SessionError> {
+            self.buf.lock().unwrap().push((player, event));
+            Ok(())
+        }
+        fn log_event(&self, _: Obj, _: Box<NarrativeEvent>) -> Result<(), SessionError> {
+            Ok(())
+        }
+        fn send_system_msg(&self, _: Obj, _: &str) -> Result<(), SessionError> {
+            Ok(())
+        }
+        fn notify_shutdown(&self, _: Option<String>) -> Result<(), SessionError> {
+            Ok(())
+        }
+        fn connection_name(&self, _: Obj) -> Result<String, SessionError> {
+            Ok(String::new())
+        }
+        fn disconnect(&self, _: Obj) -> Result<(), SessionError> {
+            Ok(())
+        }
+        fn connected_players(&self, _: bool) -> Result<Vec<Obj>, SessionError> {
+            Ok(vec![])
+        }
+        fn connected_seconds(&self, _: Obj) -> Result<f64, SessionError> {
+            Ok(0.0)
+        }
+        fn idle_seconds(&self, _: Obj) -> Result<f64, SessionError> {
+            Ok(0.0)
+        }
+        fn connections(&self, _: Option<Obj>) -> Result<Vec<Obj>, SessionError> {
+            Ok(vec![])
+        }
+        fn connection_details(
+            &self,
+            _: Option<Obj>,
+        ) -> Result<Vec<moor_common::tasks::ConnectionDetails>, SessionError> {
+            Ok(vec![])
+        }
+        fn connection_attributes(&self, _: Obj) -> Result<Var, SessionError> {
+            Ok(v_int(0))
+        }
+        fn set_connection_attribute(
+            &self,
+            _: Obj,
+            _: moor_var::Symbol,
+            _: Var,
+        ) -> Result<(), SessionError> {
+            Ok(())
+        }
+    }
+
+    fn append_line(path: &Path, line: &str) {
+        let mut f = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .expect("open");
+        writeln!(f, "{line}").expect("append");
+    }
+
+    /// Publish complete pairs of blocks (heights `2k-1, 2k`) as segments; with `flush`, the rest.
+    fn publish(
+        sink: &mut FileSink,
+        genesis: &ChainTip,
+        pending: &mut Vec<SealedBlock>,
+        flush: bool,
+        crash: Option<Crash>,
+    ) {
+        while pending.len() >= 2 || (flush && !pending.is_empty()) {
+            let n = pending.len().min(2);
+            let chunk: Vec<SealedBlock> = pending.drain(..n).collect();
+            let prev = sink.tip().unwrap_or(*genesis);
+            let segment = Segment::from_sealed(prev, &chunk, true).expect("segment");
+            sink.publish(&segment).expect("publish");
+            if crash
+                == Some(Crash::Published {
+                    height: segment.tip_height(),
+                })
+            {
+                kill_now();
+            }
+        }
+    }
+
+    /// One sequencer process: recover from whatever `dir` holds, then run the script to
+    /// `BLOCKS` blocks under `schedule`. Kills itself at `crash`.
+    fn run_child(dir: &Path, schedule: &[usize], crash: Option<Crash>, group: bool, player: Obj) {
+        let state = dir.join("state");
+        let mut store = BlockStore::open(state.join("blocks")).expect("block store");
+        let (journal, open) = Journal::open(state.join("journal")).expect("journal");
+        let (db, fresh, rebuilt) = prepare_db(&dir.join("db"), &store);
+        let driver = start_driver(db, fresh);
+        let key = sequencer_key();
+        if store.chain().is_none() {
+            let root = driver.state_root().expect("root").root;
+            store
+                .init_chain(StoreChain {
+                    genesis_root: root,
+                    sequencer: key.address(),
+                })
+                .expect("init chain");
+        }
+        let chain = store.chain().expect("chain");
+        if fresh {
+            assert_eq!(
+                driver.state_root().expect("root").root,
+                chain.genesis_root,
+                "a rebuilt database is at genesis"
+            );
+        }
+        let guard =
+            SigningGuard::open(state.join("sequencer.guard"), chain).expect("signing guard");
+        let genesis = ChainTip::genesis(&chain.genesis_root);
+        let mut sink = FileSink::open(dir.join("sink"), EventPolicy::Require).expect("sink");
+        let sealed = store.sealed_height();
+        let published = sink.published_tip().expect("tip");
+        let mut pending: Vec<SealedBlock> = (published + 1..=sealed)
+            .map(|h| store.sealed_block(h).expect("stored block"))
+            .collect();
+        let mut consumed: usize = (1..=sealed)
+            .map(|h| store.read(h).expect("stored block").commands.len())
+            .sum();
+        let fault: Option<FaultHook> = match crash {
+            Some(Crash::Fault(at)) => Some(Box::new(move |point| {
+                if point == at {
+                    kill_now();
+                }
+            })),
+            Some(Crash::Settled(at)) => Some(Box::new(move |point| {
+                if point == at {
+                    std::thread::sleep(Duration::from_secs(1));
+                    kill_now();
+                }
+            })),
+            _ => None,
+        };
+        let parts = DurableParts {
+            journal,
+            open,
+            store,
+            guard,
+        };
+        let (mut seq, recovery) = resume(
+            driver,
+            key,
+            SequencerParams::default(),
+            parts,
+            Arc::new(FsyncLog::default()),
+            fault,
+        )
+        .unwrap_or_else(|e| panic!("recovery failed: {e}"));
+        let notices = dir.join("notices");
+        let notice = |n: &moor_kernel::tasks::sequencer::SealNotice| {
+            append_line(
+                &notices,
+                &format!(
+                    "{} {} {}",
+                    n.height,
+                    hex(&n.header_hash),
+                    hex(&n.state_root)
+                ),
+            );
+        };
+        if let Some(resealed) = &recovery.resealed {
+            consumed += resealed.block.commands.len();
+            pending.push(resealed.block.clone());
+        }
+        // After a restart the tip's seal notice is sent again: a crash between storing the
+        // signature and sending the notice would otherwise leave hosts without it.
+        let tip = *seq.tip();
+        if tip.height > 0 {
+            notice(&moor_kernel::tasks::sequencer::SealNotice {
+                height: tip.height,
+                header_hash: tip.hash,
+                state_root: tip.state_root,
+            });
+        }
+        println!(
+            "RECOVERY rebuilt={rebuilt} base={} replayed={} {:?} resealed={:?} tip={}",
+            recovery.base,
+            recovery.replayed,
+            recovery.interrupted,
+            recovery.resealed.as_ref().map(|s| s.notice.height),
+            tip.height
+        );
+        publish(
+            &mut sink,
+            &genesis,
+            &mut pending,
+            tip.height >= BLOCKS,
+            crash,
+        );
+        let script = script(player);
+        let seen = Arc::new(StdMutex::new(
+            fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dir.join("seen"))
+                .expect("seen"),
+        ));
+        for height in tip.height + 1..=BLOCKS {
+            let left = script.len() - consumed;
+            let want = if height == BLOCKS {
+                left
+            } else {
+                schedule[height as usize - 1].min(left)
+            };
+            seq.open_block(T0 + height, Instant::now()).expect("open");
+            let entries = &script[consumed..consumed + want];
+            if group {
+                assert_eq!(seq.journal_inputs(entries).expect("journal"), want);
+            }
+            for (i, entry) in entries.iter().enumerate() {
+                let index = i as u64 + 1;
+                if !group {
+                    assert_eq!(
+                        seq.journal_inputs(std::slice::from_ref(entry))
+                            .expect("journal"),
+                        1
+                    );
+                }
+                let armed = crash == Some(Crash::MidInput { height, index });
+                let session = Arc::new(Recorder {
+                    seen: seen.clone(),
+                    height,
+                    index,
+                    buf: StdMutex::new(vec![]),
+                    armed: Arc::new(AtomicBool::new(armed)),
+                });
+                let receipt = seq.submit(entry.clone(), session, None).expect("submit");
+                if consumed + i == 0 {
+                    println!("PLAYER {:?}", receipt.admission);
+                }
+            }
+            consumed += want;
+            let sealed = seq.seal().expect("seal");
+            notice(&sealed.notice);
+            pending.push(sealed.block);
+            publish(&mut sink, &genesis, &mut pending, height == BLOCKS, crash);
+        }
+        seq.shutdown().expect("shutdown");
+    }
+
+    /// Child process entry; does nothing unless run by a kill test.
+    #[test]
+    #[ignore = "child process of the S1-2 kill tests"]
+    fn kill_child() {
+        let Ok(dir) = std::env::var("RW_KILL_DIR") else {
+            return;
+        };
+        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        deterministic::disable();
+        deterministic::configure(&DeterministicMode::on());
+        let schedule: Vec<usize> = std::env::var("RW_KILL_SCHEDULE")
+            .expect("schedule")
+            .split(',')
+            .map(|n| n.parse().expect("schedule number"))
+            .collect();
+        let crash = parse_crash(&std::env::var("RW_KILL_AT").unwrap_or_default());
+        let group = std::env::var("RW_KILL_GROUP").is_ok_and(|v| v == "1");
+        let player = Obj::mk_id(
+            std::env::var(PLAYER_ENV)
+                .expect("player")
+                .parse()
+                .expect("player number"),
+        );
+        run_child(Path::new(&dir), &schedule, crash, group, player);
+    }
+
+    /// The object number the script's delegation creates. Fixed by deterministic ids.
+    const PLAYER: i32 = 7;
+
+    struct Run {
+        killed: bool,
+        stdout: String,
+    }
+
+    fn run(dir: &Path, schedule: &[usize], crash: &str, group: bool) -> Run {
+        let schedule = schedule
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let out = Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "durability::kill_child",
+                "--exact",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("RW_KILL_DIR", dir)
+            .env("RW_KILL_SCHEDULE", schedule)
+            .env("RW_KILL_AT", crash)
+            .env("RW_KILL_GROUP", if group { "1" } else { "0" })
+            .env(PLAYER_ENV, PLAYER.to_string())
+            .output()
+            .expect("run child");
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned()
+            + &String::from_utf8_lossy(&out.stderr);
+        let killed = out.status.signal() == Some(9);
+        assert!(
+            killed || out.status.success(),
+            "child failed ({:?}, crash {crash:?}):\n{stdout}",
+            out.status
+        );
+        Run { killed, stdout }
+    }
+
+    /// Chain artifacts compared byte for byte: FileSink segments and index, block store, guard.
+    fn artifacts(dir: &Path) -> Vec<(String, Vec<u8>)> {
+        let mut paths: Vec<PathBuf> = fs::read_dir(dir.join("sink/segments"))
+            .expect("segments")
+            .map(|e| e.expect("entry").path())
+            .collect();
+        paths.sort();
+        paths.push(dir.join("sink/index"));
+        paths.push(dir.join("state/blocks/blocks.rwb"));
+        paths.push(dir.join("state/sequencer.guard"));
+        paths
+            .into_iter()
+            .map(|p| {
+                let name = p
+                    .strip_prefix(dir)
+                    .expect("under dir")
+                    .display()
+                    .to_string();
+                (name, fs::read(&p).expect("read artifact"))
+            })
+            .collect()
+    }
+
+    type Events = BTreeMap<(u64, u64), Vec<(i32, String)>>;
+
+    /// Narrative events of the stored chain, by `(height, command_index)`.
+    fn chain_events(dir: &Path) -> (Vec<usize>, Events) {
+        let store = BlockStore::open(dir.join("state/blocks")).expect("block store");
+        let mut schedule = Vec::new();
+        let mut events = Events::new();
+        for height in 1..=store.sealed_height() {
+            let block = store.read(height).expect("block");
+            schedule.push(block.commands.len());
+            for entry in block.events.entries() {
+                if u64::from(entry.event[1]) == block_events::event_tag::NARRATIVE {
+                    events
+                        .entry((height, entry.command_index))
+                        .or_default()
+                        .push((entry.recipient, hex(&entry.event)));
+                }
+            }
+        }
+        (schedule, events)
+    }
+
+    /// What the recorder sessions delivered, by `(height, command_index)`.
+    fn seen_events(dir: &Path) -> Events {
+        let mut events = Events::new();
+        for line in fs::read_to_string(dir.join("seen"))
+            .unwrap_or_default()
+            .lines()
+        {
+            let f: Vec<&str> = line.split(' ').collect();
+            events
+                .entry((f[0].parse().unwrap(), f[1].parse().unwrap()))
+                .or_default()
+                .push((f[2].parse().unwrap(), f[3].to_string()));
+        }
+        events
+    }
+
+    fn notices(dir: &Path) -> std::collections::BTreeSet<String> {
+        fs::read_to_string(dir.join("notices"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Heights the recovery runs re-executed (`resealed=Some(h)`).
+    fn resealed(stdout: &str) -> Vec<u64> {
+        stdout
+            .lines()
+            .filter_map(|l| l.split("resealed=Some(").nth(1))
+            .filter_map(|r| r.split(')').next()?.parse().ok())
+            .collect()
+    }
+
+    struct Case {
+        name: &'static str,
+        crashes: &'static [&'static str],
+        group: bool,
+        lose_db: bool,
+    }
+
+    struct Outcome {
+        name: &'static str,
+        schedule: Vec<usize>,
+        recovery: Vec<String>,
+        resealed: Vec<u64>,
+        dir: tempfile::TempDir,
+    }
+
+    fn crash_case(case: &Case) -> Outcome {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut recovery = Vec::new();
+        let mut resealed_heights = Vec::new();
+        for crash in case.crashes {
+            let r = run(dir.path(), &PLANNED, crash, case.group);
+            assert!(
+                r.killed,
+                "{}: {crash} did not kill the child:\n{}",
+                case.name, r.stdout
+            );
+            recovery.extend(
+                r.stdout
+                    .lines()
+                    .filter_map(|l| l.split("RECOVERY ").nth(1))
+                    .map(str::to_string),
+            );
+            resealed_heights.extend(resealed(&r.stdout));
+            if case.lose_db {
+                fs::remove_dir_all(dir.path().join("db")).expect("remove db");
+            }
+        }
+        let r = run(dir.path(), &PLANNED, "", case.group);
+        assert!(!r.killed, "{}: the recovery run was killed", case.name);
+        recovery.extend(
+            r.stdout
+                .lines()
+                .filter_map(|l| l.split("RECOVERY ").nth(1))
+                .map(str::to_string),
+        );
+        resealed_heights.extend(resealed(&r.stdout));
+        let (schedule, _) = chain_events(dir.path());
+        Outcome {
+            name: case.name,
+            schedule,
+            recovery,
+            resealed: resealed_heights,
+            dir,
+        }
+    }
+
+    const CASES: &[Case] = &[
+        Case {
+            name: "mid-input (block 4, input 2 half delivered)",
+            crashes: &["mid:4:2"],
+            group: false,
+            lose_db: false,
+        },
+        Case {
+            name: "mid-input (block 1, before any seal)",
+            crashes: &["mid:1:1"],
+            group: false,
+            lose_db: false,
+        },
+        Case {
+            name: "after journal write (block 2, input 1)",
+            crashes: &["journal:2:1"],
+            group: false,
+            lose_db: false,
+        },
+        Case {
+            name: "after journal write (block 4, input 2)",
+            crashes: &["journal:4:2"],
+            group: false,
+            lose_db: false,
+        },
+        Case {
+            name: "after journal write, group commit of 3",
+            crashes: &["journal:4:3"],
+            group: true,
+            lose_db: false,
+        },
+        Case {
+            name: "after open of an empty block",
+            crashes: &["opened:3"],
+            group: false,
+            lose_db: false,
+        },
+        Case {
+            name: "after seal write (block 4)",
+            crashes: &["unsigned:4"],
+            group: false,
+            lose_db: false,
+        },
+        Case {
+            name: "after seal write (empty block 3)",
+            crashes: &["unsigned:3"],
+            group: false,
+            lose_db: false,
+        },
+        Case {
+            name: "after guard write (block 4)",
+            crashes: &["guard:4"],
+            group: false,
+            lose_db: false,
+        },
+        Case {
+            name: "after seal write, database persisted (block 4)",
+            crashes: &["settled-unsigned:4"],
+            group: false,
+            lose_db: false,
+        },
+        Case {
+            name: "after guard write, database persisted (block 4)",
+            crashes: &["settled-guard:4"],
+            group: false,
+            lose_db: false,
+        },
+        Case {
+            name: "after journal write, database persisted (block 4, input 2)",
+            crashes: &["settled-journal:4:2"],
+            group: false,
+            lose_db: false,
+        },
+        Case {
+            name: "after sign (block 4)",
+            crashes: &["signed:4"],
+            group: false,
+            lose_db: false,
+        },
+        Case {
+            name: "after publish (segment 3-4)",
+            crashes: &["published:4"],
+            group: false,
+            lose_db: false,
+        },
+        Case {
+            name: "crash again during recovery (guard, then sign)",
+            crashes: &["guard:4", "signed:4"],
+            group: false,
+            lose_db: false,
+        },
+        Case {
+            name: "after sign, database lost",
+            crashes: &["signed:6"],
+            group: false,
+            lose_db: true,
+        },
+    ];
+
+    #[test]
+    fn kill_minus_nine_at_every_phase_recovers_the_identical_chain_and_events() {
+        let started = Instant::now();
+        let outcomes: Vec<Outcome> = std::thread::scope(|s| {
+            let handles: Vec<_> = CASES
+                .chunks(5)
+                .map(|chunk| s.spawn(move || chunk.iter().map(crash_case).collect::<Vec<_>>()))
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|h| h.join().expect("case thread"))
+                .collect()
+        });
+        // One uninterrupted reference run per distinct effective schedule.
+        let mut references: BTreeMap<Vec<usize>, tempfile::TempDir> = BTreeMap::new();
+        for outcome in &outcomes {
+            if !references.contains_key(&outcome.schedule) {
+                let dir = tempfile::tempdir().expect("tempdir");
+                let r = run(dir.path(), &outcome.schedule, "", false);
+                assert!(!r.killed);
+                references.insert(outcome.schedule.clone(), dir);
+            }
+        }
+        let planned = references.keys().any(|s| s.as_slice() == PLANNED);
+        for (schedule, dir) in &references {
+            let (_, events) = chain_events(dir.path());
+            assert_eq!(
+                seen_events(dir.path()),
+                events,
+                "reference {schedule:?}: seen = batch"
+            );
+        }
+        let mut matrix = Vec::new();
+        for o in &outcomes {
+            let reference = references[&o.schedule].path();
+            let ours = artifacts(o.dir.path());
+            let theirs = artifacts(reference);
+            assert_eq!(
+                ours.iter().map(|(n, b)| (n, b.len())).collect::<Vec<_>>(),
+                theirs.iter().map(|(n, b)| (n, b.len())).collect::<Vec<_>>(),
+                "{}: artifact names and sizes",
+                o.name
+            );
+            for ((name, a), (_, b)) in ours.iter().zip(&theirs) {
+                assert!(a == b, "{}: {name} differs from the reference", o.name);
+            }
+            // Host-visible events: everything a host saw is in the chain, byte for byte; only
+            // the re-executed block may have inputs whose events hosts saw in part or not at all.
+            let (_, batch) = chain_events(o.dir.path());
+            let seen = seen_events(o.dir.path());
+            for key in seen.keys() {
+                assert!(
+                    batch.contains_key(key),
+                    "{}: hosts saw {key:?}, the chain has no such events",
+                    o.name
+                );
+            }
+            for (key, events) in &batch {
+                let got = seen.get(key).cloned().unwrap_or_default();
+                if o.resealed.contains(&key.0) {
+                    assert!(
+                        events.starts_with(&got),
+                        "{}: {key:?} seen is not a prefix",
+                        o.name
+                    );
+                } else {
+                    assert_eq!(
+                        &got, events,
+                        "{}: {key:?} seen differs from the batch",
+                        o.name
+                    );
+                }
+            }
+            assert_eq!(
+                notices(o.dir.path()),
+                notices(reference),
+                "{}: seal notices",
+                o.name
+            );
+            matrix.push(format!(
+                "| {} | {:?} | {} | identical |",
+                o.name,
+                o.schedule,
+                o.recovery.join("; ")
+            ));
+        }
+        println!(
+            "kill matrix ({:.1} s, planned schedule {:?} among references: {planned}):",
+            started.elapsed().as_secs_f64(),
+            PLANNED
+        );
+        for row in matrix {
+            println!("{row}");
+        }
+    }
+
+    /// Durable state for a sequencer at genesis in `dir`, sharing the guard at `guard`.
+    fn durable_parts(
+        world: &mut super::executor::World,
+        dir: &Path,
+        guard: &Path,
+    ) -> (BlockDriver, DurableParts) {
+        let out = world.block(0, &[GENESIS]);
+        assert!(matches!(out.outcomes[0].result, Some(Ok(_))));
+        let driver = world.take_driver();
+        let mut store = BlockStore::open(dir.join("blocks")).expect("store");
+        let chain = StoreChain {
+            genesis_root: driver.state_root().expect("root").root,
+            sequencer: sequencer_key().address(),
+        };
+        store.init_chain(chain).expect("chain");
+        let (journal, open) = Journal::open(dir.join("journal")).expect("journal");
+        let guard = SigningGuard::open(guard, chain).expect("guard");
+        (
+            driver,
+            DurableParts {
+                journal,
+                open,
+                store,
+                guard,
+            },
+        )
+    }
+
+    fn durable_sequencer(
+        world: &mut super::executor::World,
+        dir: &Path,
+        guard: &Path,
+    ) -> Result<moor_kernel::tasks::sequencer::Sequencer, RecoveryError> {
+        let (driver, parts) = durable_parts(world, dir, guard);
+        resume(
+            driver,
+            sequencer_key(),
+            SequencerParams::default(),
+            parts,
+            Arc::new(FsyncLog::default()),
+            None,
+        )
+        .map(|(seq, _)| seq)
+    }
+
+    /// Seal block 1 with one disconnect under the guard at `guard`.
+    fn seal_first_block(dir: &Path, guard: &Path) {
+        let mut world = super::executor::World::start();
+        let mut seq = durable_sequencer(&mut world, dir, guard).expect("resume");
+        seq.open_block(T0, Instant::now()).expect("open");
+        seq.submit(disconnect(10), noop(), None).expect("submit");
+        seq.seal().expect("the first block 1 is signed");
+        seq.shutdown().expect("shutdown");
+    }
+
+    fn disconnect(player: i32) -> CommandEntry {
+        CommandEntry::Sequencer(moor_block::SequencerInput {
+            kind: moor_block::SequencerInputKind::Disconnected,
+            player,
+        })
+    }
+
+    #[test]
+    fn the_signing_guard_blocks_a_forced_second_signature_at_a_height() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let guard = dir.path().join("sequencer.guard");
+        seal_first_block(&dir.path().join("a"), &guard);
+        // Same key and chain, a database and store that never saw block 1, the recovery checks
+        // bypassed: a different block 1 must still not be signed.
+        let mut world = super::executor::World::start();
+        let (driver, parts) = durable_parts(&mut world, &dir.path().join("b"), &guard);
+        let hooks = DurableHooks::new(
+            parts.journal,
+            parts.store,
+            parts.guard,
+            Arc::new(FsyncLog::default()),
+            None,
+        );
+        let mut seq = moor_kernel::tasks::sequencer::Sequencer::genesis(
+            driver,
+            sequencer_key(),
+            SequencerParams::default(),
+            Box::new(hooks),
+        )
+        .expect("genesis");
+        seq.open_block(T0, Instant::now()).expect("open");
+        seq.submit(disconnect(11), noop(), None).expect("submit");
+        let refused = seq.seal();
+        assert!(
+            matches!(&refused, Err(SequencerError::Hook("before_sign", reason)) if reason.contains("signing guard refuses height 1")),
+            "{refused:?}"
+        );
+        seq.shutdown().expect("shutdown");
+        let store = BlockStore::open(dir.path().join("b/blocks")).expect("store");
+        assert_eq!(
+            (store.sealed_height(), store.unsigned().map(|h| h.height)),
+            (0, Some(1)),
+            "the refused block is stored unsigned and never signed"
+        );
+    }
+
+    #[test]
+    fn recovery_halts_when_the_guard_records_a_height_the_store_lacks() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let guard = dir.path().join("sequencer.guard");
+        seal_first_block(&dir.path().join("a"), &guard);
+        let mut world = super::executor::World::start();
+        let refused = durable_sequencer(&mut world, &dir.path().join("b"), &guard);
+        assert!(
+            matches!(&refused, Err(RecoveryError::Halt(reason)) if reason.contains("records height 1")),
+            "{:?}",
+            refused.err()
+        );
+    }
+
+    #[test]
+    fn the_guard_file_is_locked_while_a_sequencer_holds_the_key() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let guard = dir.path().join("sequencer.guard");
+        let mut world = super::executor::World::start();
+        let seq = durable_sequencer(&mut world, &dir.path().join("a"), &guard).expect("resume");
+        let chain = StoreChain {
+            genesis_root: *seq.genesis_root(),
+            sequencer: sequencer_key().address(),
+        };
+        assert!(matches!(
+            SigningGuard::open(&guard, chain),
+            Err(moor_block::durable::DurableError::Locked(_))
+        ));
+        seq.shutdown().expect("shutdown");
+    }
+}
