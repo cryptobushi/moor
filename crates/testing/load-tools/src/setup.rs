@@ -106,6 +106,7 @@ pub async fn broadcast_handle(
                         );
                         let _ = rpc_client.make_client_rpc_call(client_id, pong_msg).await;
                     }
+                    moor_rpc::ClientsBroadcastEventUnionRef::ClientsBroadcastSealNotice(_) => {}
                 }
             }
         }
