@@ -22,7 +22,7 @@
 //! - An admitted `revoke` or `revoke_all` boots the connections that were opened through the
 //!   revoked sessions, since tokens carry no expiry.
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use moor_common::{
     envelope::{self, Envelope, EnvelopeKind},
@@ -30,7 +30,7 @@ use moor_common::{
 };
 use moor_kernel::{
     SchedulerClient,
-    tasks::envelope_admission::{Admitted, EnvelopeRun},
+    tasks::envelope_admission::{Admitted, EnvelopeRun, OnAdmitted},
 };
 use moor_runtime_api::{RpcMessageError, api::ClientReply, api::ConnectType};
 use moor_var::{Obj, Var};
@@ -38,9 +38,6 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::rpc::message_handler::RpcMessageHandler;
-
-/// How long a host waits for an envelope's tasks.
-const ENVELOPE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Envelope bytes from a hex string (with or without `0x`) or a binary value.
 pub(crate) fn envelope_bytes_from_var(payload: &Var) -> Result<Vec<u8>, RpcMessageError> {
@@ -59,7 +56,7 @@ pub(crate) fn envelope_bytes_from_hex(text: &str) -> Result<Vec<u8>, RpcMessageE
         .ok_or_else(|| RpcMessageError::InvalidRequest("envelope is not hex".into()))
 }
 
-fn rejected(run: &EnvelopeRun) -> Option<RpcMessageError> {
+pub(crate) fn rejected(run: &EnvelopeRun) -> Option<RpcMessageError> {
     run.admission
         .as_ref()
         .err()
@@ -85,15 +82,29 @@ impl RpcMessageHandler {
             )));
         }
         let session = Arc::new(self.new_rpc_session(client_id, connection, connection));
+        let bind = self.bind_on_admit(connection);
+        let run = self.run_envelope_routed(&scheduler_client, bytes, session, Some(bind))?;
+        self.finish_signed_connect(&scheduler_client, client_id, run)
+    }
+
+    /// Bind `connection` to the admitted player before `user_connected` runs, so its output
+    /// reaches the connection.
+    pub(crate) fn bind_on_admit(&self, connection: Obj) -> OnAdmitted {
         let connections = self.connections.clone();
-        let bind = Box::new(move |admitted: &Admitted| {
+        Box::new(move |admitted: &Admitted| {
             if let Err(e) = connections.associate_player_object(connection, admitted.player()) {
                 warn!(error = ?e, %connection, "could not bind signed connection");
             }
-        });
-        let run = scheduler_client
-            .submit_envelope(bytes, session, Some(bind), ENVELOPE_TIMEOUT)
-            .map_err(RpcMessageError::TaskError)?;
+        })
+    }
+
+    /// After a `connect` ran: check the verdict, record the session, mint the auth token.
+    pub(crate) fn finish_signed_connect(
+        &self,
+        scheduler_client: &SchedulerClient,
+        client_id: Uuid,
+        run: EnvelopeRun,
+    ) -> Result<ClientReply, RpcMessageError> {
         if let Some(error) = rejected(&run) {
             return Err(error);
         }
@@ -141,12 +152,11 @@ impl RpcMessageHandler {
             .player_object_for_client(client_id)
             .unwrap_or(connection);
         let session = Arc::new(self.new_rpc_session(client_id, connection, player));
-        let run = scheduler_client
-            .submit_envelope(bytes, session, None, ENVELOPE_TIMEOUT)
-            .map_err(RpcMessageError::TaskError)?;
+        let run = self.run_envelope_routed(&scheduler_client, bytes, session, None)?;
         if let Some(error) = rejected(&run) {
             return Err(error);
         }
+        self.publish_envelope_completion(client_id, &run);
         if let Ok(Admitted::Revoked { player, sessions }) = &run.admission {
             self.boot_revoked_sessions(*player, sessions);
         }

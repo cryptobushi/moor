@@ -972,6 +972,15 @@ impl TelnetConnection {
                     trace!("broadcast_event");
 
                     match event_msg.event {
+                        BroadcastEvent::SealNotice { height, header_hash, state_root } => {
+                            // RuneWorld sequencer mode: a block was sealed (ADR 0006).
+                            debug!(
+                                height,
+                                header_hash = %hex_bytes(&header_hash),
+                                state_root = %hex_bytes(&state_root),
+                                "seal notice"
+                            );
+                        }
                         BroadcastEvent::PingPong => {
                             let timestamp = SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
@@ -1166,6 +1175,15 @@ impl TelnetConnection {
                 }
                 Ok(event_msg) = self.broadcast_sub.recv_client_broadcast() => {
                     match event_msg.event {
+                        BroadcastEvent::SealNotice { height, header_hash, state_root } => {
+                            // RuneWorld sequencer mode: a block was sealed (ADR 0006).
+                            debug!(
+                                height,
+                                header_hash = %hex_bytes(&header_hash),
+                                state_root = %hex_bytes(&state_root),
+                                "seal notice"
+                            );
+                        }
                         BroadcastEvent::PingPong => {
                             let timestamp = SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
@@ -2059,6 +2077,11 @@ fn output_str_format(
         // text/plain, None, or unknown
         _ => FormattedOutput::Plain(content.to_string()),
     })
+}
+
+/// Lowercase hex, for log fields.
+fn hex_bytes(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 #[cfg(test)]

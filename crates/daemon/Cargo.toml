@@ -44,6 +44,7 @@ path = "src/bin/moor-daemon.rs"
 # Telemetry
 
 # Internal Dependencies
+moor-block = { path = "../block" }
 moor-common = { path = "../common" }
 moor-compiler = { path = "../compiler" }
 moor-db = { path = "../db" }

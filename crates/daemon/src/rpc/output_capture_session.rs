@@ -324,7 +324,10 @@ impl OutputCaptureSession {
             return Ok(());
         }
         self.send
-            .send(SessionActions::PublishNarrativeEvents(events))
+            .send(SessionActions::PublishNarrativeEvents(
+                events,
+                crate::rpc::session::current_block_tag(),
+            ))
             .map_err(|e| SessionError::CommitError(e.to_string()))
     }
 }
@@ -380,7 +383,7 @@ mod tests {
         fn published(&self) -> Vec<(Obj, Box<NarrativeEvent>)> {
             let mut all = vec![];
             while let Ok(action) = self.published.try_recv() {
-                if let SessionActions::PublishNarrativeEvents(events) = action {
+                if let SessionActions::PublishNarrativeEvents(events, _) = action {
                     all.extend(events);
                 }
             }

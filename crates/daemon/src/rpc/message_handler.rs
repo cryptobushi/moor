@@ -55,7 +55,7 @@ use moor_kernel::{
 use crate::runtime::RuntimeApi;
 use moor_runtime_api::{
     AuthToken, ClientToken, HostType, RpcMessageError,
-    api::{BroadcastEvent, ClientEvent, HostBroadcastEvent},
+    api::{BlockTag, BroadcastEvent, ClientEvent, HostBroadcastEvent},
 };
 use moor_var::{Obj, SYSTEM_OBJECT, Symbol, Var};
 use rusty_paseto::prelude::Key;
@@ -154,6 +154,14 @@ pub trait MessageHandler: RuntimeApi + Send + Sync {
     #[cfg(test)]
     fn wait_for_disconnect_tasks(&self, expected: usize) -> Result<(), Error>;
 
+    /// Sequencer mode: route logged inputs to the block thread's queue from now on.
+    fn attach_sequencer(
+        &self,
+        _handle: crate::sequencer::SequencerHandle,
+        _dev_signer: Option<Arc<crate::sequencer::dev_signer::DevSigner>>,
+    ) {
+    }
+
     /// Switch the player for the given connection object to the new player.
     fn switch_player(
         &self,
@@ -189,6 +197,10 @@ pub struct RpcMessageHandler {
     /// Clients connected by a signed `connect`, with the player and session they used, so that
     /// revoking a session boots them (deterministic mode).
     pub(crate) signed_sessions: std::sync::Mutex<std::collections::HashMap<Uuid, (Obj, u32)>>,
+    /// Sequencer mode (RuneWorld ADR 0006): the block thread's input queue.
+    pub(crate) sequencer: std::sync::OnceLock<crate::sequencer::SequencerHandle>,
+    /// Sequencer mode with `--dev-identity`: the daemon signs for the development player.
+    pub(crate) dev_signer: std::sync::OnceLock<Arc<crate::sequencer::dev_signer::DevSigner>>,
 }
 
 impl RpcMessageHandler {
@@ -241,6 +253,8 @@ impl RpcMessageHandler {
             transport,
             client_events: ClientEventBuffer::new(),
             signed_sessions: Default::default(),
+            sequencer: Default::default(),
+            dev_signer: Default::default(),
         }
     }
 }
@@ -356,8 +370,8 @@ impl MessageHandler for RpcMessageHandler {
                     )?;
                 }
             }
-            SessionActions::PublishNarrativeEvents(events) => {
-                if let Err(e) = self.publish_narrative_events(&events) {
+            SessionActions::PublishNarrativeEvents(events, block) => {
+                if let Err(e) = self.publish_narrative_events(&events, block) {
                     error!(error = ?e, "Unable to publish narrative events");
                 }
             }
@@ -459,6 +473,19 @@ impl MessageHandler for RpcMessageHandler {
         Ok(())
     }
 
+    fn attach_sequencer(
+        &self,
+        handle: crate::sequencer::SequencerHandle,
+        dev_signer: Option<Arc<crate::sequencer::dev_signer::DevSigner>>,
+    ) {
+        if self.sequencer.set(handle).is_err() {
+            warn!("a sequencer is already attached");
+        }
+        if let Some(dev_signer) = dev_signer {
+            let _ = self.dev_signer.set(dev_signer);
+        }
+    }
+
     fn switch_player(
         &self,
         connection_obj: Obj,
@@ -496,7 +523,11 @@ impl MessageHandler for RpcMessageHandler {
 }
 
 impl RpcMessageHandler {
-    fn publish_narrative_events(&self, events: &[(Obj, Box<NarrativeEvent>)]) -> Result<(), Error> {
+    fn publish_narrative_events(
+        &self,
+        events: &[(Obj, Box<NarrativeEvent>)],
+        block: Option<BlockTag>,
+    ) -> Result<(), Error> {
         for (player, event) in events {
             let client_ids = self.connections.client_ids_for(*player)?;
             let client_event = match &event.event {
@@ -521,6 +552,7 @@ impl RpcMessageHandler {
                 _ => ClientEvent::Narrative {
                     player: *player,
                     event: event.as_ref().clone(),
+                    block,
                 },
             };
 

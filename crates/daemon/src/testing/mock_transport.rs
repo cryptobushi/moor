@@ -263,7 +263,7 @@ impl Transport for MockTransport {
         message: ClientEventMessage,
         _encoded: Vec<u8>,
     ) -> Result<(), eyre::Error> {
-        if let ClientEvent::Narrative { player, event } = &message.event {
+        if let ClientEvent::Narrative { player, event, .. } = &message.event {
             self.narrative_events
                 .lock()
                 .unwrap()

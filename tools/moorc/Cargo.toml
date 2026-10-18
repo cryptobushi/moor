@@ -27,6 +27,7 @@ assets = [
 
 [dependencies]
 # Internal Dependencies
+moor-block = { path = "../../crates/block" }
 moor-common = { path = "../../crates/common" }
 moor-compiler = { path = "../../crates/compiler" }
 moor-db = { path = "../../crates/db" }

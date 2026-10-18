@@ -34,6 +34,7 @@ pub mod message_handler;
 mod message_handler;
 mod message_handler_auth;
 mod message_handler_envelope;
+mod message_handler_sequencer;
 mod message_handler_tasks;
 mod output_capture_session;
 mod server;

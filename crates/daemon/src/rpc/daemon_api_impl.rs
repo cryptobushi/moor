@@ -180,6 +180,9 @@ impl RuntimeApi for RpcMessageHandler {
             warn!(%client_id, "{reason}");
             return Err(RpcMessageError::PermissionDenied);
         }
+        if let Some(reply) = self.sequencer_route(&scheduler_client, client_id, &request) {
+            return reply;
+        }
         match request {
             ClientRequest::EventStream {
                 client_token,
@@ -1787,7 +1790,7 @@ impl RpcMessageHandler {
 
     /// Extract and verify both client token and auth token from a typed request.
     /// Returns (connection_obj, player).
-    fn verify_tokens(
+    pub(crate) fn verify_tokens(
         &self,
         client_token: ClientToken,
         auth_token: AuthToken,

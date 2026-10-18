@@ -19,7 +19,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use crate::api::{
-    self, BatchAction, BatchActionEntry, BroadcastEvent, ClientEvent, ClientEventMessage,
+    self, BatchAction, BatchActionEntry, BlockTag, BroadcastEvent, ClientEvent, ClientEventMessage,
     ClientReply, ClientRequest, ConnectType, EntityType, HostBroadcastEvent, HostReply,
     HostRequest, InvocationMode, ListenerInfo,
 };
@@ -199,13 +199,19 @@ pub fn encode_client_event(
         ClientEvent::EventsAvailable => moor_rpc::ClientEventUnion::EventsAvailableEvent(Box::new(
             moor_rpc::EventsAvailableEvent {},
         )),
-        ClientEvent::Narrative { player, event } => {
+        ClientEvent::Narrative {
+            player,
+            event,
+            block,
+        } => {
             let event = convert::narrative_event_to_flatbuffer_struct(event)
                 .map_err(|e| RpcMessageError::InternalError(e.to_string()))?;
             moor_rpc::ClientEventUnion::NarrativeEventMessage(Box::new(
                 moor_rpc::NarrativeEventMessage {
                     player: obj_fb(player),
                     event: Box::new(event),
+                    block_height: block.map_or(0, |b| b.height),
+                    command_index: block.map_or(0, |b| b.command_index),
                 },
             ))
         }
@@ -309,6 +315,17 @@ pub fn encode_broadcast_event(event: &BroadcastEvent) -> moor_rpc::ClientsBroadc
         BroadcastEvent::PingPong => moor_rpc::ClientsBroadcastEventUnion::ClientsBroadcastPingPong(
             Box::new(moor_rpc::ClientsBroadcastPingPong { timestamp: 0 }),
         ),
+        BroadcastEvent::SealNotice {
+            height,
+            header_hash,
+            state_root,
+        } => moor_rpc::ClientsBroadcastEventUnion::ClientsBroadcastSealNotice(Box::new(
+            moor_rpc::ClientsBroadcastSealNotice {
+                height: *height,
+                header_hash: header_hash.to_vec(),
+                state_root: state_root.to_vec(),
+            },
+        )),
     };
     moor_rpc::ClientsBroadcastEvent { event }
 }
@@ -402,7 +419,21 @@ pub fn decode_client_event_ref(
             let event = convert::narrative_event_from_ref(event_ref).map_err(|e| {
                 RpcError::CouldNotDecode(format!("Failed to decode narrative event: {e}"))
             })?;
-            Ok(ClientEvent::Narrative { player, event })
+            let block_height = narrative.block_height().map_err(|e| {
+                RpcError::CouldNotDecode(format!("Bad narrative block height: {e}"))
+            })?;
+            let command_index = narrative.command_index().map_err(|e| {
+                RpcError::CouldNotDecode(format!("Bad narrative command index: {e}"))
+            })?;
+            let block = (block_height != 0).then_some(BlockTag {
+                height: block_height,
+                command_index,
+            });
+            Ok(ClientEvent::Narrative {
+                player,
+                event,
+                block,
+            })
         }
         moor_rpc::ClientEventUnionRef::RequestInputEvent(input) => {
             let request_id = input
@@ -525,6 +556,24 @@ pub fn decode_broadcast_event_ref(
     {
         moor_rpc::ClientsBroadcastEventUnionRef::ClientsBroadcastPingPong(_) => {
             Ok(BroadcastEvent::PingPong)
+        }
+        moor_rpc::ClientsBroadcastEventUnionRef::ClientsBroadcastSealNotice(notice) => {
+            let hash32 = |bytes: Result<&[u8], planus::Error>, field: &str| {
+                bytes
+                    .map_err(|e| RpcError::CouldNotDecode(format!("Bad seal notice {field}: {e}")))
+                    .and_then(|b| {
+                        <[u8; 32]>::try_from(b).map_err(|_| {
+                            RpcError::CouldNotDecode(format!("Seal notice {field} is not 32 bytes"))
+                        })
+                    })
+            };
+            Ok(BroadcastEvent::SealNotice {
+                height: notice.height().map_err(|e| {
+                    RpcError::CouldNotDecode(format!("Bad seal notice height: {e}"))
+                })?,
+                header_hash: hash32(notice.header_hash(), "header_hash")?,
+                state_root: hash32(notice.state_root(), "state_root")?,
+            })
         }
     }
 }

@@ -57,6 +57,7 @@ mod enrollment;
 mod event_log;
 mod rpc;
 mod runtime;
+pub mod sequencer;
 mod system_control;
 mod tasks;
 #[cfg(test)]
@@ -499,6 +500,166 @@ fn invoke_server_started_hook(
     Ok(())
 }
 
+/// What the daemon joins at exit: the scheduler's service threads, or the sequencer's block
+/// thread (which stops the scheduler itself).
+enum SchedulerJoin {
+    Threads(moor_kernel::tasks::scheduler::SchedulerThreads),
+    Sequencer(std::thread::JoinHandle<()>),
+}
+
+impl SchedulerJoin {
+    fn join(self) -> std::thread::Result<()> {
+        match self {
+            Self::Threads(threads) => threads.join(),
+            Self::Sequencer(handle) => handle.join(),
+        }
+    }
+}
+
+/// Read the sequencer's secp256k1 secret: 64 hex digits (an optional `0x`), surrounding
+/// whitespace ignored.
+fn load_sequencer_key(path: &Path) -> Result<moor_block::SequencerKey, Report> {
+    let text = fs::read_to_string(path)
+        .map_err(|e| eyre!("reading sequencer key {}: {e}", path.display()))?;
+    let text = text.trim();
+    let secret = moor_block::unhex(text.strip_prefix("0x").unwrap_or(text))
+        .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
+        .ok_or_else(|| eyre!("sequencer key {} is not 64 hex digits", path.display()))?;
+    moor_block::SequencerKey::from_secret(&secret)
+        .ok_or_else(|| eyre!("sequencer key {} is not a valid secret", path.display()))
+}
+
+/// Sequencer mode (RuneWorld ADR 0006): take the scheduler under a block driver, continue the
+/// published chain (or start one at genesis), and start the block and DA threads.
+fn start_sequencer(
+    config: &Config,
+    data_dir: &Path,
+    scheduler: &Scheduler,
+    rpc_server: &Arc<RpcServer>,
+) -> Result<(sequencer::SequencerHandle, std::thread::JoinHandle<()>), Report> {
+    use moor_block::{ChainParams, DaSink, EventPolicy, FileSink};
+    use moor_kernel::tasks::sequencer::{NoHooks, Sequencer, SequencerParams};
+
+    let key_path = config
+        .sequencer
+        .key_file
+        .as_ref()
+        .ok_or_else(|| eyre!("--sequencer needs --sequencer-key"))?;
+    let key = load_sequencer_key(key_path)?;
+    let sink_dir = config
+        .sequencer
+        .sink_dir
+        .clone()
+        .unwrap_or_else(|| data_dir.join("fsink"));
+    let sink = FileSink::open(&sink_dir, EventPolicy::Require)
+        .map_err(|e| eyre!("opening FileSink {}: {e}", sink_dir.display()))?;
+    let dev_identity = config
+        .dev
+        .identity
+        .as_ref()
+        .map(|path| dev_identity::load(path))
+        .transpose()?;
+    let driver = scheduler
+        .start_block_driver(rpc_server.clone())
+        .map_err(|e| eyre!("Failed to start the block driver: {e}"))?;
+    let params = SequencerParams::default();
+    let sequencer = match sink.tip() {
+        Some(tip) => {
+            let first = sink
+                .read(1, 1)
+                .map_err(|e| eyre!("reading the first segment: {e}"))?;
+            let genesis_root = first
+                .first()
+                .map(|segment| segment.prev().state_root)
+                .ok_or_else(|| eyre!("FileSink has a tip but no first segment"))?;
+            let chain = ChainParams {
+                genesis_root,
+                sequencer: key.address(),
+            };
+            let last = sink
+                .read(tip.height, tip.height)
+                .map_err(|e| eyre!("reading the tip segment: {e}"))?;
+            if let Some(segment) = last.last() {
+                segment
+                    .verify(&chain)
+                    .map_err(|e| eyre!("the published tip was not signed by this key: {e}"))?;
+            }
+            let root = driver
+                .state_root()
+                .map_err(|e| eyre!("state root: {e}"))?
+                .root;
+            if root != tip.state_root {
+                bail!(
+                    "the database's state root {} is not the published tip's {} at height {}; \
+                     recovery from a crash mid-block is not implemented yet (S1-2): restore the \
+                     database from genesis and replay",
+                    moor_block::hex(&root),
+                    moor_block::hex(&tip.state_root),
+                    tip.height
+                );
+            }
+            info!(
+                height = tip.height,
+                "sequencer continues the published chain"
+            );
+            Sequencer::new(driver, key, genesis_root, tip, params, Box::new(NoHooks))
+        }
+        None => {
+            if let (Some(identity), Some(player)) = (&dev_identity, config.sequencer.dev_player) {
+                // Genesis set-up (ADR 0005 `reassign_wallet`): part of the genesis state, so a
+                // replayer must apply the same assignment before block 1.
+                scheduler
+                    .assign_wallet(Obj::mk_id(player), identity.address())
+                    .map_err(|e| eyre!("binding the development wallet: {e}"))?;
+                info!(
+                    player,
+                    wallet = %identity.address(),
+                    "genesis: development wallet bound"
+                );
+            }
+            Sequencer::genesis(driver, key, params, Box::new(NoHooks))
+                .map_err(|e| eyre!("genesis: {e}"))?
+        }
+    };
+    let genesis_root = *sequencer.genesis_root();
+    if config.deterministic.domain_salt != genesis_root {
+        warn!(
+            domain_salt = %moor_block::hex(&config.deterministic.domain_salt),
+            genesis_root = %moor_block::hex(&genesis_root),
+            "the envelope domain salt is not the genesis root (ADR 0005 decision 2)"
+        );
+    }
+    if config.dev.any() {
+        warn!("Sequencer with a development identity: its log is replayable but non-publishing");
+    }
+    info!(
+        genesis_root = %moor_block::hex(&genesis_root),
+        sequencer = %sequencer.chain_params().sequencer,
+        sink = %sink_dir.display(),
+        "sequencer ready"
+    );
+    let dev_signer = match (dev_identity, config.sequencer.dev_player) {
+        (Some(identity), Some(player)) => Some(Arc::new(sequencer::dev_signer::DevSigner::new(
+            identity,
+            Obj::mk_id(player),
+            moor_common::envelope::Domain::new(config.deterministic.domain_salt),
+        ))),
+        (Some(_), None) => {
+            warn!("--dev-identity without --dev-player: password login is refused");
+            None
+        }
+        _ => None,
+    };
+    let (handle, block_thread) = sequencer::start(sequencer::SequencerParts {
+        sequencer,
+        sink,
+        segment_blocks: config.sequencer.segment_blocks,
+        notify: rpc_server.seal_notifier(),
+    })?;
+    rpc_server.attach_sequencer(handle.clone(), dev_signer);
+    Ok((handle, block_thread))
+}
+
 /// Host for the moor runtime.
 ///   * Brings up the database
 ///   * Instantiates a scheduler
@@ -531,7 +692,21 @@ pub fn run(runtime_config: DaemonRuntimeConfig, runtime: DaemonRuntime) -> Resul
     // Deterministic mode runs the scheduler on the manual executor: workers are off (audit E1),
     // and every client request, host-side write included, goes through its single sequencer
     // thread (audit S4, S11).
+    if config.sequencer.enabled {
+        if !config.deterministic.is_on() {
+            bail!("--sequencer needs --deterministic");
+        }
+        if config.dev.unsigned_rpc {
+            bail!(
+                "--sequencer cannot run with --dev-unsigned-rpc: unsigned writes would change \
+                 state outside the log"
+            );
+        }
+    }
     if config.deterministic.is_on() {
+        // Configure before any import, so that a genesis import derives its definition ids the
+        // same way in every process (a replayer loads the same core under the same context).
+        moor_common::deterministic::configure(&config.deterministic);
         if config.dev.any() {
             warn!(
                 unsigned_rpc = config.dev.unsigned_rpc,
@@ -945,21 +1120,36 @@ pub fn run(runtime_config: DaemonRuntimeConfig, runtime: DaemonRuntime) -> Resul
         Ok(())
     })()?;
 
-    // Start the scheduler (spawns timer + worker-response threads internally).
-    let scheduler_loop_jh = scheduler
-        .start(rpc_server.clone())
-        .map_err(|e| eyre!("Failed to start scheduler: {e}"))?;
+    // Start the scheduler (spawns timer + worker-response threads internally), or, in sequencer
+    // mode, the block thread that owns it.
+    let (scheduler_loop_jh, sequencer_handle) = if config.sequencer.enabled {
+        let (handle, block_thread) =
+            start_sequencer(&config, &paths.data_dir, &scheduler, &rpc_server)?;
+        (SchedulerJoin::Sequencer(block_thread), Some(handle))
+    } else {
+        let threads = scheduler
+            .start(rpc_server.clone())
+            .map_err(|e| eyre!("Failed to start scheduler: {e}"))?;
+        (SchedulerJoin::Threads(threads), None)
+    };
 
     let shutdown_watcher_requested = shutdown_requested.clone();
     let shutdown_watcher_kill_switch = kill_switch.clone();
     let shutdown_watcher_scheduler = scheduler_client.clone();
+    let shutdown_watcher_sequencer = sequencer_handle.clone();
     spawn_efficient("moor-shutdown", move || {
         loop {
             if shutdown_watcher_kill_switch.load(std::sync::atomic::Ordering::Relaxed) {
                 break;
             }
             if shutdown_watcher_requested.load(std::sync::atomic::Ordering::Relaxed) {
-                if let Err(e) = shutdown_watcher_scheduler.submit_shutdown("System shutting down") {
+                if let Some(sequencer) = &shutdown_watcher_sequencer {
+                    // The block thread seals its open block, flushes publication, then stops
+                    // the scheduler, which stops the RPC loop.
+                    sequencer.stop();
+                } else if let Err(e) =
+                    shutdown_watcher_scheduler.submit_shutdown("System shutting down")
+                {
                     error!("Failed to submit shutdown request: {e}");
                 }
                 break;
@@ -968,8 +1158,13 @@ pub fn run(runtime_config: DaemonRuntimeConfig, runtime: DaemonRuntime) -> Resul
         }
     })?;
 
-    // Invoke server_started hook if it exists
-    invoke_server_started_hook(&scheduler_client, &rpc_server)?;
+    // Invoke server_started hook if it exists. Not in sequencer mode: it would run MOO code
+    // outside the log.
+    if config.sequencer.enabled {
+        info!("Sequencer mode: server_started is not invoked");
+    } else {
+        invoke_server_started_hook(&scheduler_client, &rpc_server)?;
+    }
 
     if let Some(local_runtime_sender) = local_runtime_sender {
         let _ = local_runtime_sender.send(LocalRuntimeInit {
@@ -1036,7 +1231,9 @@ pub fn run(runtime_config: DaemonRuntimeConfig, runtime: DaemonRuntime) -> Resul
 
     // A transport can also stop independently of an external shutdown request. In that
     // case the scheduler is still running and must be stopped before its threads are joined.
-    if scheduler_client.check_status().is_ok()
+    if let Some(sequencer) = &sequencer_handle {
+        sequencer.stop();
+    } else if scheduler_client.check_status().is_ok()
         && let Err(e) = scheduler_client.submit_shutdown("System shutting down")
     {
         error!("Failed to send shutdown signal to scheduler: {e}");

@@ -67,6 +67,11 @@ impl RpcMessageHandler {
     ) -> Result<(), Error> {
         let session = Arc::new(self.new_rpc_session(client_id, *connection, *player));
 
+        // Sequencer mode: the disconnect is logged as a `Disconnected` sequencer input.
+        if self.enqueue_disconnect(*player, session.clone()) {
+            return Ok(());
+        }
+
         // In deterministic mode a disconnect is an authority-free sequencer input that runs only
         // `player:disfunc()` (RuneWorld ADR 0005 decision 6).
         if self.config.deterministic.is_on() {

@@ -1166,6 +1166,10 @@ union ClientEventUnion {
 table NarrativeEventMessage {
     player: MoorCommon.Obj (required);
     event: MoorCommon.NarrativeEvent (required);
+    // RuneWorld sequencer mode (ADR 0006 decision 2): the block height and command index of the
+    // input that produced the event. 0 when untagged (blocks start at height 1).
+    block_height: uint64;
+    command_index: uint64;
 }
 
 table MetadataPair {
@@ -1230,11 +1234,19 @@ table ClientEvent {
 // ============================================================================
 
 union ClientsBroadcastEventUnion {
-    ClientsBroadcastPingPong
+    ClientsBroadcastPingPong,
+    ClientsBroadcastSealNotice
 }
 
 table ClientsBroadcastPingPong {
     timestamp: uint64;  // SystemTime as nanos since epoch
+}
+
+// RuneWorld sequencer mode (ADR 0006 decision 2): a block was sealed.
+table ClientsBroadcastSealNotice {
+    height: uint64;
+    header_hash: [ubyte] (required);  // 32 bytes
+    state_root: [ubyte] (required);   // 32 bytes
 }
 
 table ClientsBroadcastEvent {

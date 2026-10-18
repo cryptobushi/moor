@@ -241,6 +241,10 @@ impl ClientSession {
                 Ok(event_msg) = self.broadcast_sub.recv_client_broadcast() => {
                     trace!("broadcast_event");
                     match event_msg.event {
+                        BroadcastEvent::SealNotice { height, .. } => {
+                            // RuneWorld sequencer mode (ADR 0006): not forwarded to web clients yet.
+                            tracing::trace!(height, "seal notice");
+                        }
                         BroadcastEvent::PingPong => {
                             let timestamp = match SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
                                 Ok(duration) => duration.as_nanos() as u64,

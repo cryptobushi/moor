@@ -214,6 +214,45 @@ pub struct Args {
 
     #[arg(
         long,
+        help = "RuneWorld sequencer mode (needs --deterministic): one input queue, 1 s blocks \
+                sealed with the --sequencer-key and published to the --sequencer-sink FileSink. \
+                Reads are served from the last committed state; only logged inputs change it."
+    )]
+    pub sequencer: bool,
+
+    #[arg(
+        long,
+        value_name = "FILE",
+        help = "Sequencer mode: file holding the sequencer's secp256k1 secret (64 hex digits)"
+    )]
+    pub sequencer_key: Option<PathBuf>,
+
+    #[arg(
+        long,
+        value_name = "DIR",
+        help = "Sequencer mode: FileSink directory sealed segments are published to \
+                (default: <data-dir>/fsink)"
+    )]
+    pub sequencer_sink: Option<PathBuf>,
+
+    #[arg(
+        long,
+        value_name = "N",
+        help = "Sequencer mode: blocks per published segment (default 10)"
+    )]
+    pub sequencer_segment_blocks: Option<usize>,
+
+    #[arg(
+        long,
+        value_name = "OBJ",
+        help = "Sequencer mode with --dev-identity: the player object number the development \
+                wallet is bound to at genesis; the daemon then signs that player's password-login \
+                connects and unsigned commands with the keyfile's session key"
+    )]
+    pub dev_player: Option<i32>,
+
+    #[arg(
+        long,
         help = "Generate ED25519 keypair if it doesn't exist, then continue"
     )]
     pub generate_keypair: bool,
@@ -440,6 +479,21 @@ impl Args {
         }
         if let Some(path) = &self.dev_identity {
             config.dev.identity = Some(path.clone());
+        }
+        if self.sequencer {
+            config.sequencer.enabled = true;
+        }
+        if let Some(path) = &self.sequencer_key {
+            config.sequencer.key_file = Some(path.clone());
+        }
+        if let Some(path) = &self.sequencer_sink {
+            config.sequencer.sink_dir = Some(path.clone());
+        }
+        if let Some(n) = self.sequencer_segment_blocks {
+            config.sequencer.segment_blocks = n;
+        }
+        if let Some(player) = self.dev_player {
+            config.sequencer.dev_player = Some(player);
         }
         if let Some(args) = self.feature_args.as_ref() {
             let mut copy = config.features.as_ref().clone();

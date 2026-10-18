@@ -211,6 +211,25 @@ enum StateCommand {
         #[arg(long)]
         full: bool,
     },
+    /// Replay a sequencer's FileSink from genesis through the block driver (RuneWorld ADR 0006):
+    /// check every segment's tip signature, the seed rule, and each block's events_root and
+    /// state_root. Use with `--deterministic` and the sequencer's feature flags. A minimal
+    /// replayer; `tools/replayer` is the real one.
+    ReplaySink {
+        /// The FileSink directory.
+        #[arg(long)]
+        sink: PathBuf,
+        /// Genesis wallet bindings the sequencer made before block 1, as `N=0xADDRESS`
+        /// (development identity).
+        #[arg(long)]
+        assign_wallet: Vec<String>,
+        /// The envelope domain salt (64 hex digits); zero by default.
+        #[arg(long)]
+        domain_salt: Option<String>,
+        /// The expected sequencer address; recovered from the first segment if absent.
+        #[arg(long)]
+        sequencer: Option<String>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -282,7 +301,137 @@ fn run_state_command(database: &TxDB, command: &StateCommand) -> Result<(), eyre
                 DumpFormat::Cbor => io::stdout().write_all(&dump.encode())?,
             }
         }
+        StateCommand::ReplaySink { .. } => bail!("replay-sink needs the loaded world"),
     }
+    Ok(())
+}
+
+fn hex32(text: &str, what: &str) -> Result<[u8; 32], eyre::Report> {
+    moor_block::unhex(text.strip_prefix("0x").unwrap_or(text))
+        .and_then(|b| <[u8; 32]>::try_from(b).ok())
+        .ok_or_else(|| eyre!("{what} must be 64 hex digits"))
+}
+
+fn address(text: &str) -> Result<moor_block::Address, eyre::Report> {
+    moor_block::unhex(text.strip_prefix("0x").unwrap_or(text))
+        .and_then(|b| <[u8; 20]>::try_from(b).ok())
+        .map(moor_block::Address)
+        .ok_or_else(|| eyre!("{text} is not a 20-byte address"))
+}
+
+/// `moorc ... replay-sink`: re-execute a FileSink's blocks from genesis and check every root.
+fn replay_sink(
+    database: TxDB,
+    features: FeaturesConfig,
+    sink_dir: &std::path::Path,
+    assign_wallet: &[String],
+    domain_salt: Option<&str>,
+    sequencer: Option<&str>,
+) -> Result<(), eyre::Report> {
+    use moor_block::{ChainParams, ChainTip, DaSink, EventPolicy, FileSink};
+    use moor_common::deterministic::DeterministicMode;
+    use moor_kernel::tasks::sequencer::replay_block;
+
+    let started = std::time::Instant::now();
+    if !moor_common::deterministic::is_enabled() {
+        bail!("replay-sink needs --deterministic (the genesis must load as the sequencer's did)");
+    }
+    let mode = DeterministicMode {
+        domain_salt: domain_salt
+            .map(|s| hex32(s, "--domain-salt"))
+            .transpose()?
+            .unwrap_or([0; 32]),
+        ..DeterministicMode::on()
+    };
+    let config = Config {
+        features: Arc::new(features),
+        deterministic: mode,
+        ..Default::default()
+    };
+    let scheduler = Scheduler::new(
+        semver::Version::new(0, 1, 0),
+        Box::new(database),
+        Box::new(NoopTasksDb {}),
+        Arc::new(config),
+        Arc::new(NoopSystemControl::default()),
+        None,
+        None,
+    );
+    for binding in assign_wallet {
+        let (player, wallet) = binding
+            .split_once('=')
+            .ok_or_else(|| eyre!("--assign-wallet takes N=0xADDRESS, got {binding}"))?;
+        let player: i32 = player.trim_start_matches('#').parse()?;
+        let wallet = moor_common::envelope::Address::from_hex(wallet)
+            .ok_or_else(|| eyre!("{wallet} is not a wallet address"))?;
+        scheduler
+            .assign_wallet(Obj::mk_id(player), wallet)
+            .map_err(|e| eyre!("assign wallet: {e}"))?;
+    }
+    let mut driver = scheduler
+        .start_block_driver(Arc::new(crate::testrun::NoopSessionFactory {}))
+        .map_err(|e| eyre!("block driver: {e}"))?;
+    let genesis_root = driver.state_root().map_err(|e| eyre!("{e}"))?.root;
+    let sink = FileSink::open(sink_dir, EventPolicy::Optional)
+        .map_err(|e| eyre!("opening {}: {e}", sink_dir.display()))?;
+    let Some(tip) = sink.tip() else {
+        bail!("{} holds no blocks", sink_dir.display());
+    };
+    let segments = sink
+        .read(1, tip.height)
+        .map_err(|e| eyre!("reading: {e}"))?;
+    let genesis = ChainTip::genesis(&genesis_root);
+    let first = segments.first().ok_or_else(|| eyre!("no segments"))?;
+    if *first.prev() != genesis {
+        bail!(
+            "genesis differs: the sink starts from state root {}, this load is {}",
+            moor_block::hex(&first.prev().state_root),
+            moor_block::hex(&genesis_root)
+        );
+    }
+    let sequencer = match sequencer {
+        Some(text) => address(text)?,
+        None => first
+            .tip_signature()
+            .recover(&genesis_root, &first.tip().hash)
+            .map_err(|e| eyre!("recovering the sequencer: {e}"))?,
+    };
+    let params = ChainParams {
+        genesis_root,
+        sequencer,
+    };
+    let (mut blocks, mut commands, mut events) = (0u64, 0usize, 0usize);
+    let mut prev = genesis;
+    for segment in &segments {
+        segment
+            .verify(&params)
+            .map_err(|e| eyre!("segment {}: {e}", segment.first_height()))?;
+        for (i, block) in segment.blocks().iter().enumerate() {
+            if block.header.height <= prev.height {
+                continue;
+            }
+            let published = segment.events().map(|batches| &batches[i]);
+            let batch = replay_block(&mut driver, &prev, block, published)
+                .map_err(|mismatch| eyre!("replay halted: {mismatch}"))?;
+            blocks += 1;
+            commands += block.commands.len();
+            events += batch.len();
+            prev = ChainTip::of(&block.header);
+        }
+    }
+    println!(
+        "replayed {blocks} blocks ({commands} commands, {events} events) in {:.2?}: every \
+         signature, seed, events_root and state_root matches",
+        started.elapsed()
+    );
+    println!(
+        "genesis {}\nsequencer {sequencer}\ntip height {} hash {} state_root {}",
+        moor_block::hex(&genesis_root),
+        prev.height,
+        moor_block::hex(&prev.hash),
+        moor_block::hex(&prev.state_root)
+    );
+    driver.shutdown().map_err(|e| eyre!("{e}"))?;
     Ok(())
 }
 
@@ -601,6 +750,22 @@ fn main() -> Result<(), eyre::Report> {
         }
     }
 
+    if let Some(StateCommand::ReplaySink {
+        sink,
+        assign_wallet,
+        domain_salt,
+        sequencer,
+    }) = &args.command
+    {
+        return replay_sink(
+            database,
+            features,
+            sink,
+            assign_wallet,
+            domain_salt.as_deref(),
+            sequencer.as_deref(),
+        );
+    }
     if let Some(command) = &args.command {
         run_state_command(&database, command)?;
         drop(database);

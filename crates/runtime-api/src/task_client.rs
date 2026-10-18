@@ -418,7 +418,7 @@ async fn dispatcher_loop(
             }
 
             // ----- Session-level events → broadcast channel -----
-            ClientEvent::Narrative { player, event } => {
+            ClientEvent::Narrative { player, event, .. } => {
                 let _ = session_tx.send(SessionEvent::Narrative(player, event));
             }
             ClientEvent::SystemMessage { player, message } => {

@@ -125,6 +125,30 @@ impl RpcServer {
         (server, task_monitor, system_control)
     }
 
+    /// Sequencer mode: route logged inputs to the block thread from now on.
+    pub fn attach_sequencer(
+        &self,
+        handle: crate::sequencer::SequencerHandle,
+        dev_signer: Option<Arc<crate::sequencer::dev_signer::DevSigner>>,
+    ) {
+        self.message_handler.attach_sequencer(handle, dev_signer);
+    }
+
+    /// Sequencer mode: broadcast a seal notice on the clients' broadcast topic.
+    pub fn seal_notifier(&self) -> Box<dyn Fn(moor_kernel::tasks::sequencer::SealNotice) + Send> {
+        let transport = self.transport.clone();
+        Box::new(move |notice| {
+            let event = moor_runtime_api::api::BroadcastEvent::SealNotice {
+                height: notice.height,
+                header_hash: notice.header_hash,
+                state_root: notice.state_root,
+            };
+            if let Err(e) = transport.broadcast_client_event(event) {
+                error!(error = ?e, height = notice.height, "could not broadcast a seal notice");
+            }
+        })
+    }
+
     pub fn request_loop(
         &self,
         rpc_endpoint: String,

@@ -17,13 +17,25 @@ use flume::Sender;
 use uuid::Uuid;
 
 use moor_common::tasks::{ConnectionDetails, NarrativeEvent, Session, SessionError};
-use moor_runtime_api::api::ClientEvent;
+use moor_runtime_api::api::{BlockTag, ClientEvent};
 use moor_var::{Obj, Symbol, Var};
 
 use crate::{
     connections::ConnectionStateSource, event_log::EventLogOps,
     rpc::session_event_buffer::SessionEventBuffer,
 };
+
+/// The block and input whose transaction is committing, in sequencer mode. Session commits run on
+/// the block thread inside the input, so the process-wide block context names them. Untagged
+/// outside a block (height 0).
+pub(crate) fn current_block_tag() -> Option<BlockTag> {
+    moor_common::deterministic::current()
+        .filter(|ctx| ctx.block.height > 0)
+        .map(|ctx| BlockTag {
+            height: ctx.block.height,
+            command_index: ctx.command,
+        })
+}
 
 /// A "session" that runs over the RPC system.
 pub struct RpcSession {
@@ -38,7 +50,8 @@ pub struct RpcSession {
 pub enum SessionActions {
     #[cfg(test)]
     Barrier(Sender<()>),
-    PublishNarrativeEvents(Vec<(Obj, Box<NarrativeEvent>)>),
+    /// Committed events and, in sequencer mode, the block and input that produced them.
+    PublishNarrativeEvents(Vec<(Obj, Box<NarrativeEvent>)>, Option<BlockTag>),
     RequestClientInput {
         client_id: Uuid,
         connection: Obj,
@@ -88,7 +101,10 @@ impl Session for RpcSession {
 
         // Only publish regular events to connected clients (not log_only_events)
         self.send
-            .send(SessionActions::PublishNarrativeEvents(events))
+            .send(SessionActions::PublishNarrativeEvents(
+                events,
+                current_block_tag(),
+            ))
             .map_err(|e| SessionError::CommitError(e.to_string()))?;
         Ok(())
     }
@@ -273,7 +289,7 @@ mod tests {
 
     fn published(actions: &flume::Receiver<SessionActions>) -> Vec<(Obj, Box<NarrativeEvent>)> {
         match actions.try_recv() {
-            Ok(SessionActions::PublishNarrativeEvents(events)) => events,
+            Ok(SessionActions::PublishNarrativeEvents(events, _)) => events,
             Ok(_) => panic!("expected narrative events"),
             Err(e) => panic!("no session action published: {e}"),
         }

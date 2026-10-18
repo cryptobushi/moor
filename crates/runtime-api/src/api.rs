@@ -310,6 +310,9 @@ pub enum ClientEvent {
     Narrative {
         player: Obj,
         event: NarrativeEvent,
+        /// In RuneWorld sequencer mode, the block and input that produced the event (soft
+        /// confirmation, ADR 0006 decision 2). `None` elsewhere.
+        block: Option<BlockTag>,
     },
     RequestInput {
         request_id: Uuid,
@@ -354,10 +357,24 @@ pub struct BroadcastEventMessage {
     pub event: BroadcastEvent,
 }
 
+/// The block height and command index of the sequenced input that produced an event
+/// (RuneWorld ADR 0006 decision 2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockTag {
+    pub height: u64,
+    pub command_index: u64,
+}
+
 /// Broadcast events sent to all client hosts.
 #[derive(Debug, Clone)]
 pub enum BroadcastEvent {
     PingPong,
+    /// RuneWorld sequencer mode: a block was sealed (ADR 0006 decision 2).
+    SealNotice {
+        height: u64,
+        header_hash: [u8; 32],
+        state_root: [u8; 32],
+    },
 }
 
 /// Host lifecycle broadcast events.
