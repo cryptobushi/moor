@@ -96,11 +96,15 @@ impl BlockHeader {
         })
     }
 
+    pub(crate) fn decode_from(d: &mut Decoder) -> Result<Self, FormatError> {
+        d.array_of(8)?;
+        Self::decode_fields(d)
+    }
+
     /// Decode an unsigned header.
     pub fn decode(bytes: &[u8]) -> Result<Self, FormatError> {
         let mut d = Decoder::new(bytes);
-        d.array_of(8)?;
-        let header = Self::decode_fields(&mut d)?;
+        let header = Self::decode_from(&mut d)?;
         d.finish()?;
         Ok(header)
     }

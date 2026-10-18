@@ -21,6 +21,7 @@
 //! - [`merkle`]: RFC 6962 roots and inclusion proofs for `commands_root` and `events_root`.
 //! - [`Segment`]: the published, zstd-compressed run of consecutive blocks.
 //! - [`DaSink`] and [`FileSink`]: where segments are published.
+//! - [`durable`]: the sequencer's input journal, local block store and signing guard.
 //!
 //! Everything is RFC 8949 §4.2.1 deterministic CBOR ([`cbor`]), so two sequencers given the same
 //! inputs produce the same bytes. This crate has no MOO dependency: envelopes and events are opaque
@@ -28,6 +29,7 @@
 
 pub mod cbor;
 mod command;
+pub mod durable;
 mod error;
 mod event;
 mod file_sink;
