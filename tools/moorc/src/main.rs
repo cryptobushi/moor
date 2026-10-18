@@ -229,6 +229,25 @@ enum StateCommand {
         /// The expected sequencer address; recovered from the first segment if absent.
         #[arg(long)]
         sequencer: Option<String>,
+        /// The genesis record (`genesis.cbor` of the sink or the sequencer's state directory):
+        /// supplies the wallet bindings and the domain salt unless given, and the loaded core,
+        /// feature flags and genesis root must be the ones it pins.
+        #[arg(long)]
+        genesis: Option<PathBuf>,
+        /// Stop after this block and report it as the tip (default: the sink's tip).
+        #[arg(long)]
+        stop_at: Option<u64>,
+        /// After the last replayed block, write a canonical state dump (`relations.json` and
+        /// `<relation>.entries`, the format `rw-replayer --state-ref` reads) into this directory.
+        /// With `--stop-at H` this is the state at any height the sink holds: the node's own
+        /// database cannot go back.
+        #[arg(long)]
+        dump_dir: Option<PathBuf>,
+        /// The sequencer's state directory: each replayed block's relation hashes are compared
+        /// with the ones the sequencer recorded when it sealed the block, and a difference names
+        /// the relation.
+        #[arg(long)]
+        sequencer_state: Option<PathBuf>,
     },
 }
 
@@ -319,18 +338,80 @@ fn address(text: &str) -> Result<moor_block::Address, eyre::Report> {
         .ok_or_else(|| eyre!("{text} is not a 20-byte address"))
 }
 
+/// What `moorc ... replay-sink` was asked.
+struct ReplaySinkOptions<'a> {
+    sink: &'a std::path::Path,
+    assign_wallet: &'a [String],
+    domain_salt: Option<&'a str>,
+    sequencer: Option<&'a str>,
+    genesis: Option<&'a std::path::Path>,
+    stop_at: Option<u64>,
+    dump_dir: Option<&'a std::path::Path>,
+    sequencer_state: Option<&'a std::path::Path>,
+    /// The objdef directory that was loaded, to check against the genesis record's manifest.
+    core_dir: Option<&'a std::path::Path>,
+}
+
 /// `moorc ... replay-sink`: re-execute a FileSink's blocks from genesis and check every root.
 fn replay_sink(
     database: TxDB,
     features: FeaturesConfig,
-    sink_dir: &std::path::Path,
-    assign_wallet: &[String],
-    domain_salt: Option<&str>,
-    sequencer: Option<&str>,
+    options: &ReplaySinkOptions<'_>,
 ) -> Result<(), eyre::Report> {
-    use moor_block::{ChainParams, ChainTip, DaSink, EventPolicy, FileSink};
+    use moor_block::{
+        ChainParams, ChainTip, DaSink, EventPolicy, FileSink, GenesisRecord,
+        durable::RelationLog,
+    };
     use moor_common::deterministic::DeterministicMode;
-    use moor_kernel::tasks::sequencer::replay_block;
+    use moor_kernel::tasks::sequencer::{Published, replay_block_full};
+
+    let ReplaySinkOptions {
+        sink: sink_dir,
+        domain_salt,
+        sequencer,
+        ..
+    } = *options;
+    let record = options
+        .genesis
+        .map(|path| {
+            let bytes = fs::read(path).map_err(|e| eyre!("reading {}: {e}", path.display()))?;
+            GenesisRecord::decode(&bytes).map_err(|e| eyre!("{}: {e}", path.display()))
+        })
+        .transpose()?;
+    let mut assign_wallet: Vec<String> = options.assign_wallet.to_vec();
+    let mut domain_salt = domain_salt.map(str::to_string);
+    if let Some(record) = &record {
+        if let Some(core) = options.core_dir {
+            record
+                .check_core_dir(core)
+                .map_err(|e| eyre!("the loaded core is not the genesis record's: {e}"))?;
+        }
+        if moor_kernel::config::feature_flags(&features) != record.features {
+            bail!(
+                "the feature flags differ from the genesis record's: record {:?}, given {:?}",
+                record.features,
+                moor_kernel::config::feature_flags(&features)
+            );
+        }
+        if assign_wallet.is_empty() {
+            assign_wallet = record
+                .principals
+                .iter()
+                .map(|p| format!("{}={}", p.player, p.wallet))
+                .collect();
+        }
+        if domain_salt.is_none() {
+            domain_salt = Some(moor_block::hex(&record.domain_salt));
+        }
+        println!("genesis record: fork commit {}", record.fork_commit);
+    }
+    let (assign_wallet, domain_salt) = (&assign_wallet[..], domain_salt.as_deref());
+    let relation_log = options
+        .sequencer_state
+        .map(|dir| RelationLog::open_read_only(dir.join("blocks")))
+        .transpose()
+        .map_err(|e| eyre!("opening the sequencer's relation log: {e}"))?
+        .flatten();
 
     let started = std::time::Instant::now();
     if !moor_common::deterministic::is_enabled() {
@@ -372,14 +453,22 @@ fn replay_sink(
         .start_block_driver(Arc::new(crate::testrun::NoopSessionFactory {}))
         .map_err(|e| eyre!("block driver: {e}"))?;
     let genesis_root = driver.state_root().map_err(|e| eyre!("{e}"))?.root;
-    let sink = FileSink::open(sink_dir, EventPolicy::Optional)
+    if let Some(record) = &record
+        && record.genesis_root != genesis_root
+    {
+        bail!(
+            "the genesis built here has root {}, the genesis record's is {}",
+            moor_block::hex(&genesis_root),
+            moor_block::hex(&record.genesis_root)
+        );
+    }
+    let sink = FileSink::open_read_only(sink_dir, EventPolicy::Optional)
         .map_err(|e| eyre!("opening {}: {e}", sink_dir.display()))?;
     let Some(tip) = sink.tip() else {
         bail!("{} holds no blocks", sink_dir.display());
     };
-    let segments = sink
-        .read(1, tip.height)
-        .map_err(|e| eyre!("reading: {e}"))?;
+    let last = options.stop_at.unwrap_or(tip.height).min(tip.height);
+    let segments = sink.read(1, last).map_err(|e| eyre!("reading: {e}"))?;
     let genesis = ChainTip::genesis(&genesis_root);
     let first = segments.first().ok_or_else(|| eyre!("no segments"))?;
     if *first.prev() != genesis {
@@ -410,12 +499,31 @@ fn replay_sink(
             if block.header.height <= prev.height {
                 continue;
             }
-            let published = segment.events().map(|batches| &batches[i]);
-            let batch = replay_block(&mut driver, &prev, block, published)
-                .map_err(|mismatch| eyre!("replay halted: {mismatch}"))?;
+            if block.header.height > last {
+                break;
+            }
+            let recorded = relation_log
+                .as_ref()
+                .map(|log| log.get(block.header.height))
+                .transpose()
+                .map_err(|e| eyre!("relation log: {e}"))?
+                .flatten();
+            let replayed = replay_block_full(
+                &mut driver,
+                &prev,
+                block,
+                Published {
+                    events: segment.events().map(|batches| &batches[i]),
+                    relations: recorded.as_deref(),
+                },
+            )
+            .map_err(|mismatch| eyre!("replay halted: {mismatch}"))?;
+            if let Some(mismatch) = replayed.mismatches.first() {
+                bail!("replay halted: {mismatch}");
+            }
             blocks += 1;
             commands += block.commands.len();
-            events += batch.len();
+            events += replayed.events.len();
             prev = ChainTip::of(&block.header);
         }
     }
@@ -431,6 +539,17 @@ fn replay_sink(
         moor_block::hex(&prev.hash),
         moor_block::hex(&prev.state_root)
     );
+    if let Some(dir) = options.dump_dir {
+        let root = driver.state_root().map_err(|e| eyre!("state root: {e}"))?;
+        let relations = moor_db::state_root::RELATIONS
+            .iter()
+            .map(|name| driver.canonical_relation(name))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| eyre!("reading the state: {e}"))?;
+        moor_db::state_root::dump::write_dump(dir, prev.height, &root, &relations)
+            .map_err(|e| eyre!("writing the dump to {}: {e}", dir.display()))?;
+        println!("state dump at height {} written to {}", prev.height, dir.display());
+    }
     driver.shutdown().map_err(|e| eyre!("{e}"))?;
     Ok(())
 }
@@ -699,7 +818,7 @@ fn main() -> Result<(), eyre::Report> {
             .commit()
             .expect("Failure to commit loaded database...");
         info!("Committed. Total time: {:?}", start.elapsed());
-    } else if let Some(objdef_dir) = args.src_objdef_dir {
+    } else if let Some(objdef_dir) = args.src_objdef_dir.clone() {
         let start = std::time::Instant::now();
         let mut od = ObjectDefinitionLoader::new(loader_interface.as_mut());
 
@@ -755,15 +874,26 @@ fn main() -> Result<(), eyre::Report> {
         assign_wallet,
         domain_salt,
         sequencer,
+        genesis,
+        stop_at,
+        dump_dir,
+        sequencer_state,
     }) = &args.command
     {
         return replay_sink(
             database,
             features,
-            sink,
-            assign_wallet,
-            domain_salt.as_deref(),
-            sequencer.as_deref(),
+            &ReplaySinkOptions {
+                sink,
+                assign_wallet,
+                domain_salt: domain_salt.as_deref(),
+                sequencer: sequencer.as_deref(),
+                genesis: genesis.as_deref(),
+                stop_at: *stop_at,
+                dump_dir: dump_dir.as_deref(),
+                sequencer_state: sequencer_state.as_deref(),
+                core_dir: args.src_objdef_dir.as_deref(),
+            },
         );
     }
     if let Some(command) = &args.command {

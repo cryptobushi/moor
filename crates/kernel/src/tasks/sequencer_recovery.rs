@@ -51,8 +51,8 @@ use moor_db::state_root::checkpoint::{CheckpointDir, StoredCheckpoint};
 use crate::tasks::{
     block_driver::BlockDriver,
     sequencer::{
-        ReplayMismatch, Sealed, Sequencer, SequencerError, SequencerHooks, SequencerParams,
-        replay_block,
+        Published, ReplayMismatch, Sealed, Sequencer, SequencerError, SequencerHooks,
+        SequencerParams, relation_hashes, replay_block_full,
     },
 };
 
@@ -210,6 +210,17 @@ impl SequencerHooks for DurableHooks {
         Ok(())
     }
 
+    fn state_root(
+        &mut self,
+        height: u64,
+        root: &moor_db::state_root::StateRoot,
+    ) -> Result<(), String> {
+        self.store
+            .put_relations(height, &relation_hashes(root))
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
     fn sealed(&mut self, block: &SealedBlock) -> Result<(), String> {
         let height = block.header.header.height;
         self.store
@@ -298,10 +309,12 @@ pub fn usable_checkpoint(dir: &CheckpointDir, store: &BlockStore) -> Option<Stor
     }
 }
 
-/// Re-execute stored blocks `from..=to` on `driver`, checking roots and events.
+/// Re-execute stored blocks `from..=to` on `driver`, checking roots and events, and recording the
+/// per-relation hashes a block lacks (blocks sealed before they were kept) or checking them
+/// against the recorded ones.
 fn replay_stored(
     driver: &mut BlockDriver,
-    store: &BlockStore,
+    store: &mut BlockStore,
     genesis_root: &[u8; 32],
     from: u64,
     to: u64,
@@ -319,10 +332,25 @@ fn replay_stored(
             header: stored.header,
             commands: stored.commands,
         };
-        let events = replay_block(driver, &prev, &block, Some(&stored.events))?;
-        if events != stored.events {
+        let recorded = store.relations(height)?;
+        let replayed = replay_block_full(
+            driver,
+            &prev,
+            &block,
+            Published {
+                events: Some(&stored.events),
+                relations: recorded.as_deref(),
+            },
+        )?;
+        if let Some(mismatch) = replayed.mismatches.into_iter().next() {
+            return Err(mismatch.into());
+        }
+        if replayed.events != stored.events {
             return Err(ReplayMismatch::EventsRoot { height, seq: None }.into());
         }
+        // A recorded height that disagrees is a conflict error: two executions of one block
+        // produced different relation hashes under the same root, which cannot happen.
+        store.put_relations(height, &relation_hashes(&replayed.state_root))?;
         prev = ChainTip::of(&block.header);
     }
     Ok(())
@@ -343,7 +371,7 @@ pub fn resume(
     let DurableParts {
         journal,
         open,
-        store,
+        mut store,
         guard,
     } = parts;
     let chain = store
@@ -394,7 +422,7 @@ pub fn resume(
             .ok_or(RecoveryError::Rebuild(root))?
     };
     if base < sealed {
-        replay_stored(&mut driver, &store, &chain.genesis_root, base + 1, sealed)?;
+        replay_stored(&mut driver, &mut store, &chain.genesis_root, base + 1, sealed)?;
     }
     let replayed = sealed - base;
 

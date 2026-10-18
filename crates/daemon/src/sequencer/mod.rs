@@ -39,6 +39,7 @@
 
 pub mod dev_signer;
 pub mod metrics;
+pub mod state_service;
 
 use std::{
     collections::VecDeque,
@@ -60,7 +61,10 @@ use moor_kernel::tasks::{
 };
 use tracing::{debug, error, info, warn};
 
-use self::metrics::Metrics;
+use self::{
+    metrics::Metrics,
+    state_service::{StateReply, StateRequest, entries_text},
+};
 
 /// Sealed blocks allowed to wait for publication before the sequencer stops opening blocks.
 pub const MAX_DA_LAG: u64 = 300;
@@ -119,6 +123,8 @@ pub struct SequencerStatus {
 #[derive(Clone)]
 pub struct SequencerHandle {
     inputs: Sender<QueuedInput>,
+    /// Live state dump requests for the block thread (`state_service`).
+    state_requests: Sender<StateRequest>,
     status: Arc<SequencerStatus>,
     stop: Arc<AtomicBool>,
 }
@@ -181,6 +187,12 @@ impl SequencerHandle {
         self.status.stalled.load(Ordering::Acquire)
     }
 
+    /// Whether [`Self::stop`] has been called.
+    #[must_use]
+    pub fn is_stopping(&self) -> bool {
+        self.stop.load(Ordering::Acquire)
+    }
+
     /// Ask the block thread to seal its open block, flush publication and stop the scheduler.
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Release);
@@ -210,6 +222,7 @@ pub struct SequencerParts {
 /// finishes after [`SequencerHandle::stop`] once the scheduler has stopped.
 pub fn start(parts: SequencerParts) -> std::io::Result<(SequencerHandle, JoinHandle<()>)> {
     let (inputs, queue) = flume::unbounded();
+    let (state_requests, state_queue) = flume::unbounded();
     let status = Arc::new(SequencerStatus::default());
     let stop = Arc::new(AtomicBool::new(false));
     let tip = *parts.sequencer.tip();
@@ -227,6 +240,7 @@ pub fn start(parts: SequencerParts) -> std::io::Result<(SequencerHandle, JoinHan
     }
     let handle = SequencerHandle {
         inputs,
+        state_requests,
         status: status.clone(),
         stop: stop.clone(),
     };
@@ -257,6 +271,7 @@ pub fn start(parts: SequencerParts) -> std::io::Result<(SequencerHandle, JoinHan
             let mut block_loop = BlockLoop {
                 sequencer: Some(parts.sequencer),
                 queue,
+                state_queue,
                 carry: VecDeque::new(),
                 status,
                 stop,
@@ -298,6 +313,8 @@ fn wall_secs() -> u64 {
 struct BlockLoop {
     sequencer: Option<Sequencer>,
     queue: Receiver<QueuedInput>,
+    /// Live state dump requests, answered between blocks.
+    state_queue: Receiver<StateRequest>,
     /// The input that did not fit the last block; it runs first in the next.
     carry: VecDeque<QueuedInput>,
     status: Arc<SequencerStatus>,
@@ -320,6 +337,31 @@ impl BlockLoop {
 
     fn stopping(&self) -> bool {
         self.stop.load(Ordering::Acquire)
+    }
+
+    /// Answer pending live state dump requests. Called between two blocks, when the committed
+    /// state is exactly the sealed tip's, so a dump is the state the tip's root covers.
+    fn serve_state_requests(&mut self) {
+        let requests: Vec<StateRequest> = self.state_queue.try_iter().collect();
+        for StateRequest {
+            height,
+            relation,
+            reply,
+        } in requests
+        {
+            let tip = self.sequencer().tip().height;
+            let answer = if height != tip {
+                StateReply::NotTip { tip }
+            } else if !moor_db::state_root::RELATIONS.contains(&relation.as_str()) {
+                StateReply::UnknownRelation
+            } else {
+                match self.sequencer().driver().canonical_relation(&relation) {
+                    Ok(canonical) => StateReply::Entries(entries_text(&canonical)),
+                    Err(e) => StateReply::Failed(e.to_string()),
+                }
+            };
+            let _ = reply.send(answer);
+        }
     }
 
     fn drain_segment_reports(&mut self) {
@@ -347,6 +389,7 @@ impl BlockLoop {
                     LogStatus::Resumed { sealed, published }
                 });
             }
+            self.serve_state_requests();
             let result = if stalled {
                 Err(format!(
                     "log stalled: {} sealed blocks are unpublished",

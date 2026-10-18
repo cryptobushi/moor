@@ -2975,7 +2975,8 @@ mod sequencer {
         block_events,
         envelope_admission::Admitted,
         sequencer::{
-            NoHooks, ReplayMismatch, Sequencer, SequencerError, SequencerParams, replay_block,
+            NoHooks, Published, ReplayMismatch, Sequencer, SequencerError, SequencerHooks,
+            SequencerParams, relation_hashes, replay_block, replay_block_full,
         },
     };
     use moor_var::Obj;
@@ -2996,6 +2997,11 @@ mod sequencer {
 
     /// A world with the signed-world hooks loaded before genesis, and a sequencer at genesis.
     fn start(params: SequencerParams) -> (World, Sequencer) {
+        start_hooked(params, Box::new(NoHooks))
+    }
+
+    /// [`start`] with sequencer hooks.
+    fn start_hooked(params: SequencerParams, hooks: Box<dyn SequencerHooks>) -> (World, Sequencer) {
         let mut world = World::start();
         let out = world.block(0, &[GENESIS]);
         assert!(
@@ -3004,8 +3010,8 @@ mod sequencer {
             out.outcomes[0].result
         );
         let driver = world.take_driver();
-        let sequencer = Sequencer::genesis(driver, sequencer_key(), params, Box::new(NoHooks))
-            .expect("genesis");
+        let sequencer =
+            Sequencer::genesis(driver, sequencer_key(), params, hooks).expect("genesis");
         (world, sequencer)
     }
 
@@ -3073,7 +3079,9 @@ mod sequencer {
     }
 
     fn publish(dir: &Path, genesis_root: &[u8; 32], blocks: &[SealedBlock], per: usize) {
-        let mut sink = FileSink::open(dir, EventPolicy::Require).expect("sink");
+        let mut sink = FileSink::open(dir, EventPolicy::Require)
+            .expect("sink")
+            .with_clock(|| T0);
         let mut prev = ChainTip::genesis(genesis_root);
         for chunk in blocks.chunks(per) {
             let segment = Segment::from_sealed(prev, chunk, true).expect("segment");
@@ -3485,6 +3493,175 @@ mod sequencer {
             Err(ReplayMismatch::EventsRoot {
                 height: 2,
                 seq: Some(1)
+            })
+        );
+    }
+
+    /// Hooks that keep each sealed block's state root and relation hashes.
+    struct RelationRecorder(Arc<StdMutex<Vec<(u64, moor_db::state_root::StateRoot)>>>);
+
+    impl SequencerHooks for RelationRecorder {
+        fn state_root(
+            &mut self,
+            height: u64,
+            root: &moor_db::state_root::StateRoot,
+        ) -> Result<(), String> {
+            self.0.lock().unwrap().push((height, root.clone()));
+            Ok(())
+        }
+    }
+
+    /// The scenario's blocks, with what the state-root hook saw at each seal.
+    fn recorded_scenario() -> (Vec<SealedBlock>, Vec<(u64, moor_db::state_root::StateRoot)>) {
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let (_world, mut seq) = start_hooked(
+            SequencerParams::default(),
+            Box::new(RelationRecorder(seen.clone())),
+        );
+        let blocks = scenario(&mut seq);
+        seq.shutdown().unwrap();
+        let seen = seen.lock().unwrap().clone();
+        (blocks, seen)
+    }
+
+    #[test]
+    fn the_hook_sees_every_sealed_blocks_relation_hashes_and_the_headers_root() {
+        let (blocks, seen) = recorded_scenario();
+        let heights: Vec<u64> = seen.iter().map(|(h, _)| *h).collect();
+        let roots: Vec<_> = seen.iter().map(|(_, r)| r.root).collect();
+        let headers: Vec<_> = blocks.iter().map(|b| b.header.header.state_root).collect();
+        assert_eq!((heights, roots), (vec![1, 2, 3, 4], headers));
+        assert!(seen.iter().all(|(_, r)| r.relations.len() == 14));
+    }
+
+    #[test]
+    fn an_empty_block_records_the_previous_blocks_relation_hashes() {
+        let (_, seen) = recorded_scenario();
+        assert_eq!(seen[2].1.relations, seen[1].1.relations);
+    }
+
+    #[test]
+    fn replay_block_full_returns_events_state_root_and_per_input_outcomes() {
+        let (blocks, seen) = recorded_scenario();
+        let (published, batches) = published(&blocks);
+        let mut world = World::start();
+        let out = world.block(0, &[GENESIS]);
+        assert!(matches!(out.outcomes[0].result, Some(Ok(_))));
+        let mut driver = world.take_driver();
+        let mut prev = ChainTip::genesis(&driver.state_root().unwrap().root);
+        for (i, block) in published.iter().enumerate() {
+            let replayed = replay_block_full(
+                &mut driver,
+                &prev,
+                block,
+                Published {
+                    events: Some(&batches[i]),
+                    relations: Some(&relation_hashes(&seen[i].1)),
+                },
+            )
+            .unwrap();
+            assert!(replayed.matched(), "{:?}", replayed.mismatches);
+            assert_eq!(replayed.events, batches[i]);
+            assert_eq!(replayed.state_root, seen[i].1);
+            assert_eq!(replayed.output.outcomes.len(), block.commands.len());
+            if i == 3 {
+                // Block 4's second command is the forged one: its verdict is in the output.
+                assert!(matches!(replayed.output.outcomes[1].admission, Some(Err(_))));
+            }
+            prev = ChainTip::of(&block.header);
+        }
+        driver.shutdown().ok();
+    }
+
+    #[test]
+    fn replay_block_full_keeps_its_output_when_a_root_differs_and_names_the_relation() {
+        let (blocks, seen) = recorded_scenario();
+        let (mut published, batches) = published(&blocks);
+        let mut world = World::start();
+        let out = world.block(0, &[GENESIS]);
+        assert!(matches!(out.outcomes[0].result, Some(Ok(_))));
+        let mut driver = world.take_driver();
+        let mut prev = ChainTip::genesis(&driver.state_root().unwrap().root);
+        replay_block_full(
+            &mut driver,
+            &prev,
+            &published[0],
+            Published::default(),
+        )
+        .unwrap();
+        prev = ChainTip::of(&published[0].header);
+        // Block 2 claims a different state root, and the sequencer's recorded hashes (honest)
+        // differ from the claim in one relation: the replay names it.
+        published[1].header.state_root[0] ^= 1;
+        let mut claimed = relation_hashes(&seen[1].1);
+        let victim = 8; // object_propvalues
+        claimed[victim].hash[0] ^= 1;
+        let replayed = replay_block_full(
+            &mut driver,
+            &prev,
+            &published[1],
+            Published {
+                events: Some(&batches[1]),
+                relations: Some(&claimed),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            replayed.mismatches,
+            vec![ReplayMismatch::StateRoot {
+                height: 2,
+                relation: Some("object_propvalues")
+            }]
+        );
+        assert_eq!(replayed.state_root.root, seen[1].1.root);
+        assert_eq!(replayed.output.outcomes.len(), published[1].commands.len());
+        driver.shutdown().ok();
+    }
+
+    #[test]
+    fn replay_block_full_reports_the_events_mismatch_and_the_state_root_together() {
+        let (blocks, _) = recorded_scenario();
+        let (mut published, mut batches) = published(&blocks);
+        let mut world = World::start();
+        let out = world.block(0, &[GENESIS]);
+        assert!(matches!(out.outcomes[0].result, Some(Ok(_))));
+        let mut driver = world.take_driver();
+        let genesis = ChainTip::genesis(&driver.state_root().unwrap().root);
+        let mut entries = batches[0].entries().to_vec();
+        let last = entries.len() - 1;
+        entries[last].event[3] ^= 1;
+        batches[0] = moor_block::EventBatch::new(entries).unwrap();
+        published[0].header.events_root = batches[0].root();
+        published[0].header.state_root[0] ^= 1;
+        let replayed = replay_block_full(
+            &mut driver,
+            &genesis,
+            &published[0],
+            Published {
+                events: Some(&batches[0]),
+                relations: None,
+            },
+        )
+        .unwrap();
+        let kinds: Vec<_> = replayed
+            .mismatches
+            .iter()
+            .map(|m| matches!(m, ReplayMismatch::EventsRoot { .. }))
+            .collect();
+        assert_eq!(kinds, [true, false]);
+        driver.shutdown().ok();
+    }
+
+    #[test]
+    fn replay_block_keeps_returning_the_first_mismatch() {
+        let (blocks, _) = recorded_scenario();
+        let (mut published, batches) = published(&blocks);
+        published[0].header.state_root[0] ^= 1;
+        assert_eq!(
+            replay(&published[..1], &batches[..1]),
+            Err(ReplayMismatch::StateRoot {
+                height: 1,
+                relation: None
             })
         );
     }
@@ -3977,7 +4154,10 @@ mod durability {
         let guard =
             SigningGuard::open(state.join("sequencer.guard"), chain).expect("signing guard");
         let genesis = ChainTip::genesis(&chain.genesis_root);
-        let mut sink = FileSink::open(dir.join("sink"), EventPolicy::Require).expect("sink");
+        // A fixed receipt clock, so the sink's index compares byte for byte between runs.
+        let mut sink = FileSink::open(dir.join("sink"), EventPolicy::Require)
+            .expect("sink")
+            .with_clock(|| 1_700_000_000);
         let sealed = store.sealed_height();
         let published = sink.published_tip().expect("tip");
         let mut pending: Vec<SealedBlock> = (published + 1..=sealed)
@@ -4216,6 +4396,22 @@ mod durability {
                     .display()
                     .to_string();
                 (name, fs::read(&p).expect("read artifact"))
+            })
+            .collect()
+    }
+
+    /// The recorded per-relation hashes of every sealed height of the store in `dir`.
+    fn relation_log(dir: &Path) -> Vec<(u64, Vec<moor_block::durable::RelationHash>)> {
+        let store = BlockStore::open(dir.join("state/blocks")).expect("block store");
+        (1..=store.sealed_height())
+            .map(|h| {
+                (
+                    h,
+                    store
+                        .relations(h)
+                        .expect("relation log")
+                        .unwrap_or_else(|| panic!("no relation hashes for height {h}")),
+                )
             })
             .collect()
     }
@@ -4503,6 +4699,11 @@ mod durability {
             for ((name, a), (_, b)) in ours.iter().zip(&theirs) {
                 assert!(a == b, "{}: {name} differs from the reference", o.name);
             }
+            // R3: every sealed height has its per-relation hashes, equal to the reference run's
+            // (recovery re-records the ones a lost database or a crash left missing).
+            let (ours, theirs) = (relation_log(o.dir.path()), relation_log(reference));
+            assert!(!ours.is_empty(), "{}: no relation hashes", o.name);
+            assert_eq!(ours, theirs, "{}: relation hashes", o.name);
             // Host-visible events: everything a host saw is in the chain, byte for byte; only
             // the re-executed block may have inputs whose events hosts saw in part or not at all.
             let (_, batch) = chain_events(o.dir.path());

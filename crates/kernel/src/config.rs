@@ -74,6 +74,10 @@ pub struct SequencerConfig {
     /// Publish the checkpoint to the sink at heights divisible by this (default 86,400, daily);
     /// 0 never publishes.
     pub checkpoint_publish_every: u64,
+    /// Serve the read-only state routes (`/v1/rw/state/...`, `/v1/rw/genesis`) on this
+    /// `host:port` (fork API request R3). Off when unset. There is no authentication: bind a
+    /// loopback address or put it behind the operator's own proxy.
+    pub read_addr: Option<String>,
 }
 
 impl Default for SequencerConfig {
@@ -90,6 +94,7 @@ impl Default for SequencerConfig {
             checkpoint_every: 3_600,
             checkpoint_keep: 24,
             checkpoint_publish_every: 86_400,
+            read_addr: None,
         }
     }
 }
@@ -243,5 +248,33 @@ where
             .map(Some)
             .map_err(serde::de::Error::custom),
         None => Ok(None),
+    }
+}
+
+/// The feature flags as `(name, on)` pairs sorted by name: the form the genesis record carries
+/// (RuneWorld spec `block-format-v0.md` §13). Every flag is a boolean.
+#[must_use]
+pub fn feature_flags(features: &FeaturesConfig) -> Vec<(String, bool)> {
+    let mut flags: Vec<(String, bool)> = match serde_json::to_value(features) {
+        Ok(serde_json::Value::Object(map)) => map
+            .into_iter()
+            .filter_map(|(name, value)| value.as_bool().map(|on| (name, on)))
+            .collect(),
+        _ => Vec::new(),
+    };
+    flags.sort();
+    flags
+}
+
+#[cfg(test)]
+mod feature_flag_tests {
+    use super::*;
+
+    #[test]
+    fn feature_flags_lists_every_flag_sorted() {
+        let flags = feature_flags(&FeaturesConfig::default());
+        assert_eq!(flags.len(), 14);
+        assert!(flags.windows(2).all(|w| w[0].0 < w[1].0));
+        assert!(flags.contains(&("custom_errors".to_string(), false)));
     }
 }

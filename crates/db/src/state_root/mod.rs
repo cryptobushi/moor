@@ -31,6 +31,7 @@
 
 pub mod cbor;
 pub mod checkpoint;
+pub mod dump;
 pub mod values;
 
 use crate::engine::moor_db::{SEQUENCE_COUNT, SequenceState, WorldStateSnapshot};

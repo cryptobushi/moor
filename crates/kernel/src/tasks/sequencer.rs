@@ -43,13 +43,14 @@ use crate::tasks::{
 use moor_block::{
     Block, BlockHeader, ChainParams, ChainTip, CommandBatch, CommandEntry, EventBatch, EventEntry,
     FormatError, Hash, MAX_COMMAND_BATCH_BYTES, MAX_COMMANDS_PER_BLOCK, SealedBlock,
-    SequencerInputKind, SequencerKey, seed_for,
+    SequencerInputKind, SequencerKey, durable::RelationHash, seed_for,
 };
 use moor_common::{
     deterministic::BlockContext,
     tasks::{NoopClientSession, SchedulerError, Session},
 };
 use moor_db::state_root::checkpoint::CheckpointDir;
+use moor_db::state_root::StateRoot;
 use moor_var::{Obj, Var};
 use std::{
     path::PathBuf,
@@ -208,6 +209,12 @@ pub trait SequencerHooks: Send {
     }
     /// The block is sealed and signed.
     fn sealed(&mut self, _block: &SealedBlock) -> Result<(), String> {
+        Ok(())
+    }
+    /// The state root of block `height` with the per-relation hashes that feed it, as soon as
+    /// `end_block` has computed them (fork API request R3). Derived data: an error is logged and
+    /// never stops the seal.
+    fn state_root(&mut self, _height: u64, _root: &StateRoot) -> Result<(), String> {
         Ok(())
     }
 }
@@ -657,6 +664,11 @@ impl Sequencer {
         let end_block_time = started.elapsed();
         let started = Instant::now();
         let state_root = state_root_of(&out)?;
+        if let Some(Ok(full)) = &out.state_root
+            && let Err(e) = self.hooks.state_root(open.ctx.height, full)
+        {
+            tracing::warn!(height = open.ctx.height, "recording relation hashes: {e}");
+        }
         let events = event_batch(&out.events)?;
         let commands = CommandBatch::new(open.entries)?;
         let header = self.tip.next_header(
@@ -772,17 +784,20 @@ impl Sequencer {
             return Err(SequencerError::AlreadyOpen);
         }
         self.tip.check_next(&header)?;
-        let root = self
+        let full = self
             .driver
             .state_root()
-            .map_err(|e| SequencerError::StateRoot(e.to_string()))?
-            .root;
+            .map_err(|e| SequencerError::StateRoot(e.to_string()))?;
+        let root = full.root;
         if root != header.state_root {
             return Err(SequencerError::StateRoot(format!(
                 "the database root {} is not block {}'s",
                 moor_block::hex(&root),
                 header.height
             )));
+        }
+        if let Err(e) = self.hooks.state_root(header.height, &full) {
+            tracing::warn!(height = header.height, "recording relation hashes: {e}");
         }
         self.sign_and_store(header, commands, events, Instant::now())
     }
@@ -809,15 +824,75 @@ pub enum ReplayMismatch {
     Failed { height: u64, reason: String },
 }
 
-/// Re-execute `block` (which follows `prev`) on `driver` and check its event and state roots.
-/// `published_events` (the node's event batch, when the segment carries one) names the first
-/// differing event on an `events_root` mismatch.
-pub fn replay_block(
+/// What a replayed block produced, whether or not it matched (fork API request R5): the whole
+/// [`BlockOutput`] (per-input outcomes and admission verdicts, events, abandoned tasks), the
+/// canonical event batch, the state root with its per-relation hashes, and every check that failed,
+/// in check order.
+#[derive(Debug)]
+pub struct ReplayedBlock {
+    /// The driver's output for the block.
+    pub output: BlockOutput,
+    /// The canonical event batch of the replay.
+    pub events: EventBatch,
+    /// The replayed state root and its per-relation hashes.
+    pub state_root: StateRoot,
+    /// `events_root` first, then `state_root`; empty when the block matched.
+    pub mismatches: Vec<ReplayMismatch>,
+}
+
+impl ReplayedBlock {
+    /// Whether every check passed.
+    #[must_use]
+    pub fn matched(&self) -> bool {
+        self.mismatches.is_empty()
+    }
+}
+
+/// What a published block is compared with beyond its header.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Published<'a> {
+    /// The node's event batch (names the first differing event on an `events_root` mismatch).
+    pub events: Option<&'a EventBatch>,
+    /// The sequencer's per-relation hashes for the block (names the differing relation on a
+    /// `state_root` mismatch).
+    pub relations: Option<&'a [RelationHash]>,
+}
+
+/// The block-store form of a state root's per-relation digests.
+#[must_use]
+pub fn relation_hashes(root: &StateRoot) -> Vec<RelationHash> {
+    root.relations
+        .iter()
+        .map(|r| RelationHash {
+            name: r.name.to_string(),
+            hash: r.hash,
+            entries: r.entries,
+        })
+        .collect()
+}
+
+/// The first relation whose replayed hash differs from `published`.
+fn first_differing_relation(root: &StateRoot, published: &[RelationHash]) -> Option<&'static str> {
+    root.relations
+        .iter()
+        .find(|ours| {
+            published
+                .iter()
+                .find(|theirs| theirs.name == ours.name)
+                .is_none_or(|theirs| theirs.hash != ours.hash)
+        })
+        .map(|r| r.name)
+}
+
+/// Re-execute `block` (which follows `prev`) on `driver` and return everything it produced, with
+/// the checks of [`replay_block`] as data. `Err` only when the block could not be run at all (the
+/// seed rule fails before anything executes) or its output could not be encoded.
+pub fn replay_block_full(
     driver: &mut BlockDriver,
     prev: &ChainTip,
     block: &Block,
-    published_events: Option<&EventBatch>,
-) -> Result<EventBatch, ReplayMismatch> {
+    published: Published<'_>,
+) -> Result<ReplayedBlock, ReplayMismatch> {
     let header = &block.header;
     let height = header.height;
     if header.seed != seed_for(&prev.state_root, height) {
@@ -841,11 +916,17 @@ pub fn replay_block(
             (CommandEntry::Sequencer(_), None) => unreachable!("every sequencer input maps"),
         }
     }
-    let out = driver.end_block();
+    let output = driver.end_block();
     let failed = |reason: String| ReplayMismatch::Failed { height, reason };
-    let events = event_batch(&out.events).map_err(|e| failed(e.to_string()))?;
+    let events = event_batch(&output.events).map_err(|e| failed(e.to_string()))?;
+    let state_root = match &output.state_root {
+        Some(Ok(root)) => root.clone(),
+        Some(Err(e)) => return Err(failed(e.to_string())),
+        None => return Err(failed("no state root".into())),
+    };
+    let mut mismatches = Vec::new();
     if events.root() != header.events_root {
-        let seq = published_events.and_then(|published| {
+        let seq = published.events.and_then(|published| {
             let ours = events.entries();
             let theirs = published.entries();
             (0..ours.len().max(theirs.len()))
@@ -867,18 +948,44 @@ pub fn replay_block(
                 })
                 .map(|i| i as u64)
         });
-        return Err(ReplayMismatch::EventsRoot { height, seq });
+        mismatches.push(ReplayMismatch::EventsRoot { height, seq });
     }
-    let root = match &out.state_root {
-        Some(Ok(root)) => root.clone(),
-        Some(Err(e)) => return Err(failed(e.to_string())),
-        None => return Err(failed("no state root".into())),
-    };
-    if root.root != header.state_root {
-        return Err(ReplayMismatch::StateRoot {
+    if state_root.root != header.state_root {
+        mismatches.push(ReplayMismatch::StateRoot {
             height,
-            relation: None,
+            relation: published
+                .relations
+                .and_then(|theirs| first_differing_relation(&state_root, theirs)),
         });
     }
-    Ok(events)
+    Ok(ReplayedBlock {
+        output,
+        events,
+        state_root,
+        mismatches,
+    })
+}
+
+/// Re-execute `block` (which follows `prev`) on `driver` and check its event and state roots.
+/// `published_events` (the node's event batch, when the segment carries one) names the first
+/// differing event on an `events_root` mismatch. See [`replay_block_full`] for the whole output.
+pub fn replay_block(
+    driver: &mut BlockDriver,
+    prev: &ChainTip,
+    block: &Block,
+    published_events: Option<&EventBatch>,
+) -> Result<EventBatch, ReplayMismatch> {
+    let replayed = replay_block_full(
+        driver,
+        prev,
+        block,
+        Published {
+            events: published_events,
+            relations: None,
+        },
+    )?;
+    match replayed.mismatches.into_iter().next() {
+        Some(mismatch) => Err(mismatch),
+        None => Ok(replayed.events),
+    }
 }

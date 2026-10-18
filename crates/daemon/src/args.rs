@@ -289,6 +289,15 @@ pub struct Args {
 
     #[arg(
         long,
+        value_name = "HOST:PORT",
+        help = "Sequencer mode: serve the read-only state routes (per-relation hashes of any \
+                sealed block, the canonical relation dump of the sealed tip, the genesis \
+                record) on this address. Unauthenticated: use a loopback address"
+    )]
+    pub sequencer_read_addr: Option<String>,
+
+    #[arg(
+        long,
         value_name = "OBJ",
         help = "Sequencer mode with --dev-identity: the player object number the development \
                 wallet is bound to at genesis; the daemon then signs that player's password-login \
@@ -554,6 +563,9 @@ impl Args {
         }
         if let Some(n) = self.sequencer_checkpoint_publish_every {
             config.sequencer.checkpoint_publish_every = n;
+        }
+        if let Some(addr) = &self.sequencer_read_addr {
+            config.sequencer.read_addr = Some(addr.clone());
         }
         if let Some(player) = self.dev_player {
             config.sequencer.dev_player = Some(player);

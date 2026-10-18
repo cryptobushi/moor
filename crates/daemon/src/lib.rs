@@ -645,6 +645,59 @@ fn restore_checkpoint(
     Ok(Some(stored.header.height))
 }
 
+/// The genesis set-up as data (spec `block-format-v0.md` §13): the core manifest, the feature
+/// flags, the principals bound before block 1, the domain salt and the fork commit.
+fn genesis_record(
+    config: &Config,
+    chain: &moor_block::durable::StoreChain,
+    dev_identity: &Option<dev_identity::DevIdentity>,
+) -> moor_block::GenesisRecord {
+    let core_files = config
+        .import_export
+        .input_path
+        .as_ref()
+        .filter(|path| path.is_dir())
+        .map(|path| moor_block::core_manifest(path))
+        .transpose()
+        .unwrap_or_else(|e| {
+            warn!("hashing the core for the genesis record: {e}");
+            None
+        })
+        .unwrap_or_default();
+    let features = moor_kernel::config::feature_flags(&config.features);
+    let principals = match (dev_identity, config.sequencer.dev_player) {
+        (Some(identity), Some(player)) => vec![moor_block::Principal {
+            player,
+            wallet: moor_block::Address(identity.address().0),
+        }],
+        _ => Vec::new(),
+    };
+    moor_block::GenesisRecord {
+        genesis_root: chain.genesis_root,
+        sequencer: chain.sequencer,
+        fork_commit: moor_common::build::commit().to_string(),
+        core_files,
+        features,
+        principals,
+        domain_salt: config.deterministic.domain_salt,
+    }
+}
+
+/// Publish the genesis record to the sink and keep a copy in the sequencer's state directory.
+fn publish_genesis(
+    sink: &mut moor_block::FileSink,
+    state_dir: &Path,
+    record: &moor_block::GenesisRecord,
+) -> Result<(), Report> {
+    sink.put_genesis(record)
+        .map_err(|e| eyre!("publishing the genesis record: {e}"))?;
+    let path = state_dir.join(moor_block::GENESIS_FILE);
+    let tmp = state_dir.join(format!("{}.tmp", moor_block::GENESIS_FILE));
+    fs::write(&tmp, record.encode()).map_err(|e| eyre!("writing {}: {e}", tmp.display()))?;
+    fs::rename(&tmp, &path).map_err(|e| eyre!("writing {}: {e}", path.display()))?;
+    Ok(())
+}
+
 /// Sequencer mode (RuneWorld ADR 0006): take the scheduler under a block driver, recover the
 /// chain from the block store and journal (or start one at genesis), and start the block and DA
 /// threads.
@@ -682,7 +735,7 @@ fn start_sequencer(
         .sink_dir
         .clone()
         .unwrap_or_else(|| data_dir.join("fsink"));
-    let sink = FileSink::open(&sink_dir, EventPolicy::Require)
+    let mut sink = FileSink::open(&sink_dir, EventPolicy::Require)
         .map_err(|e| eyre!("opening FileSink {}: {e}", sink_dir.display()))?;
     let dev_identity = config
         .dev
@@ -759,9 +812,22 @@ fn start_sequencer(
             store
                 .init_chain(chain)
                 .map_err(|e| eyre!("recording the chain in the block store: {e}"))?;
+            // The genesis set-up as data, next to block 0 (fork API request R4).
+            let record = genesis_record(config, &chain, &dev_identity);
+            publish_genesis(&mut sink, &state_dir, &record)?;
             chain
         }
     };
+    if let Some(published) = moor_block::DaSink::genesis(&sink)
+        .map_err(|e| eyre!("reading the sink's genesis record: {e}"))?
+        && published.genesis_root != chain.genesis_root
+    {
+        bail!(
+            "the sink's genesis record is for root {}, the chain's is {}",
+            moor_block::hex(&published.genesis_root),
+            moor_block::hex(&chain.genesis_root)
+        );
+    }
     let guard = SigningGuard::open(&guard_path, chain)
         .map_err(|e| eyre!("opening the signing guard {}: {e}", guard_path.display()))?;
     let (journal, open) =
@@ -884,6 +950,11 @@ fn start_sequencer(
         fsync,
     })?;
     rpc_server.attach_sequencer(handle.clone(), dev_signer);
+    if let Some(addr) = &config.sequencer.read_addr {
+        let (bound, _thread) = sequencer::state_service::serve(addr, handle.clone(), &state_dir)
+            .map_err(|e| eyre!("serving the state routes on {addr}: {e}"))?;
+        info!(%bound, "sequencer state routes listening (read-only, unauthenticated)");
+    }
     Ok((handle, block_thread))
 }
 
