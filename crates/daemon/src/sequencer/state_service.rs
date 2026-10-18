@@ -26,6 +26,8 @@
 //!   be dumped live, because the database cannot go back: the block thread serves it between two
 //!   blocks, when the committed state is exactly the tip's. Any other height is `409` with the
 //!   current tip; for history, replay with `moorc ... replay-sink --stop-at H --dump-dir D`.
+//!   `tip` in place of the height dumps whatever the sealed tip is, and the answer's `X-Rw-Height`
+//!   header says which height that was.
 //! - `/v1/rw/genesis`: the genesis record (`genesis.cbor`).
 
 use std::{
@@ -49,8 +51,9 @@ const DUMP_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// A live dump request, served by the block thread between blocks.
 pub struct StateRequest {
-    /// The height the caller wants; only the sealed tip can be served.
-    pub height: u64,
+    /// The height the caller wants; only the sealed tip can be served. `None`: the sealed tip,
+    /// whatever it is.
+    pub height: Option<u64>,
     pub relation: String,
     pub reply: Sender<StateReply>,
 }
@@ -58,8 +61,8 @@ pub struct StateRequest {
 /// The block thread's answer.
 #[derive(Debug)]
 pub enum StateReply {
-    /// The relation's canonical entries as `key-hex value-hex` lines.
-    Entries(Vec<u8>),
+    /// The relation's canonical entries as `key-hex value-hex` lines, after the block at `height`.
+    Entries { height: u64, body: Vec<u8> },
     /// The requested height is not the sealed tip.
     NotTip { tip: u64 },
     /// No such relation.
@@ -120,6 +123,8 @@ pub fn manifest_json(height: u64, relations: &[RelationHash]) -> String {
 struct Response {
     status: &'static str,
     content_type: &'static str,
+    /// The height a dump is of (`X-Rw-Height`).
+    height: Option<u64>,
     body: Vec<u8>,
 }
 
@@ -128,6 +133,7 @@ impl Response {
         Self {
             status,
             content_type: "application/json",
+            height: None,
             body: body.into_bytes(),
         }
     }
@@ -152,6 +158,7 @@ impl Service {
                 Ok(bytes) => Response {
                     status: "200 OK",
                     content_type: "application/cbor",
+                    height: None,
                     body: bytes,
                 },
                 Err(_) => Response::error("404 Not Found", "this sequencer has no genesis record"),
@@ -160,8 +167,9 @@ impl Service {
                 Ok(height) => self.manifest(height),
                 Err(_) => Response::error("400 Bad Request", "the height is not a number"),
             },
+            ["v1", "rw", "state", "tip", relation] => self.dump(None, relation),
             ["v1", "rw", "state", height, relation] => match height.parse() {
-                Ok(height) => self.dump(height, relation),
+                Ok(height) => self.dump(Some(height), relation),
                 Err(_) => Response::error("400 Bad Request", "the height is not a number"),
             },
             _ => Response::error("404 Not Found", "no such route"),
@@ -195,7 +203,7 @@ impl Service {
         }
     }
 
-    fn dump(&self, height: u64, relation: &str) -> Response {
+    fn dump(&self, height: Option<u64>, relation: &str) -> Response {
         let (reply, answer) = flume::bounded(1);
         let request = StateRequest {
             height,
@@ -206,9 +214,10 @@ impl Service {
             return Response::error("503 Service Unavailable", "the sequencer has stopped");
         }
         match answer.recv_timeout(DUMP_TIMEOUT) {
-            Ok(StateReply::Entries(body)) => Response {
+            Ok(StateReply::Entries { height, body }) => Response {
                 status: "200 OK",
                 content_type: "text/plain",
+                height: Some(height),
                 body,
             },
             Ok(StateReply::NotTip { tip }) => Response::json(
@@ -243,8 +252,12 @@ fn handle_connection(service: &Service, mut stream: TcpStream) {
         (Some(_), Some(_)) => Response::error("405 Method Not Allowed", "GET only"),
         _ => Response::error("400 Bad Request", "not an HTTP request"),
     };
+    let height = response
+        .height
+        .map(|h| format!("X-Rw-Height: {h}\r\n"))
+        .unwrap_or_default();
     let header = format!(
-        "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {}\r\nContent-Type: {}\r\n{height}Content-Length: {}\r\nConnection: close\r\n\r\n",
         response.status,
         response.content_type,
         response.body.len()
@@ -293,4 +306,187 @@ pub fn serve(
             }
         })?;
     Ok((bound, thread))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, atomic::AtomicBool};
+
+    use super::super::SequencerStatus;
+
+    /// A handle whose state requests go to `requests`.
+    fn handle(requests: Sender<StateRequest>) -> SequencerHandle {
+        let (inputs, _queue) = flume::unbounded();
+        SequencerHandle {
+            inputs,
+            state_requests: requests,
+            status: Arc::new(SequencerStatus::default()),
+            stop: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn get(addr: std::net::SocketAddr, request: &str) -> (u16, String) {
+        let mut stream = TcpStream::connect(addr).unwrap();
+        stream.write_all(request.as_bytes()).unwrap();
+        let mut raw = String::new();
+        stream.read_to_string(&mut raw).unwrap();
+        let status = raw.split_whitespace().nth(1).unwrap().parse().unwrap();
+        let body = raw.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
+        (status, body)
+    }
+
+    fn get_path(addr: std::net::SocketAddr, path: &str) -> (u16, String) {
+        get(addr, &format!("GET {path} HTTP/1.1\r\nHost: x\r\n\r\n"))
+    }
+
+    fn digests() -> Vec<RelationHash> {
+        RELATIONS
+            .iter()
+            .enumerate()
+            .map(|(i, name)| RelationHash {
+                name: (*name).to_string(),
+                hash: [i as u8; 32],
+                entries: i as u64,
+            })
+            .collect()
+    }
+
+    /// A state directory with relation hashes for heights 3 and 5, served; the "block thread"
+    /// answers dumps for a sealed tip of 5.
+    fn serving() -> (tempfile::TempDir, std::net::SocketAddr, SequencerHandle) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("blocks")).unwrap();
+        let mut log = RelationLog::open(dir.path().join("blocks")).unwrap();
+        log.put(3, &digests()).unwrap();
+        log.put(5, &digests()).unwrap();
+        let (requests, queue) = flume::unbounded::<StateRequest>();
+        std::thread::spawn(move || {
+            for r in queue {
+                let answer = if r.height.is_some_and(|h| h != 5) {
+                    StateReply::NotTip { tip: 5 }
+                } else if !RELATIONS.contains(&r.relation.as_str()) {
+                    StateReply::UnknownRelation
+                } else {
+                    StateReply::Entries {
+                        height: 5,
+                        body: b"01 02\n".to_vec(),
+                    }
+                };
+                let _ = r.reply.send(answer);
+            }
+        });
+        let handle = handle(requests);
+        let (addr, _thread) = serve("127.0.0.1:0", handle.clone(), dir.path()).unwrap();
+        (dir, addr, handle)
+    }
+
+    #[test]
+    fn the_manifest_lists_the_recorded_relation_hashes_and_the_recomputed_root() {
+        let (_dir, addr, handle) = serving();
+        let (status, body) = get_path(addr, "/v1/rw/state/3");
+        handle.stop();
+        assert_eq!(status, 200);
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let root = StateRoot::from_relations(
+            digests()
+                .iter()
+                .zip(RELATIONS)
+                .map(|(d, name)| RelationDigest {
+                    name,
+                    hash: d.hash,
+                    entries: d.entries,
+                })
+                .collect(),
+        );
+        assert_eq!(
+            (json["height"].as_u64(), json["state_root"].as_str(), json["relations"].as_array().map(Vec::len)),
+            (Some(3), Some(hex(&root.root).as_str()), Some(14))
+        );
+    }
+
+    #[test]
+    fn a_height_without_recorded_hashes_is_404() {
+        let (_dir, addr, handle) = serving();
+        let (status, _) = get_path(addr, "/v1/rw/state/4");
+        handle.stop();
+        assert_eq!(status, 404);
+    }
+
+    #[test]
+    fn a_relation_dump_of_the_sealed_tip_is_served_as_entry_lines() {
+        let (_dir, addr, handle) = serving();
+        let (status, body) = get_path(addr, "/v1/rw/state/5/object_flags");
+        handle.stop();
+        assert_eq!((status, body.as_str()), (200, "01 02\n"));
+    }
+
+    #[test]
+    fn tip_dumps_whatever_the_sealed_tip_is_and_names_its_height() {
+        let (_dir, addr, handle) = serving();
+        let mut stream = TcpStream::connect(addr).unwrap();
+        stream
+            .write_all(b"GET /v1/rw/state/tip/object_flags HTTP/1.1\r\nHost: x\r\n\r\n")
+            .unwrap();
+        let mut raw = String::new();
+        stream.read_to_string(&mut raw).unwrap();
+        handle.stop();
+        assert!(raw.contains("X-Rw-Height: 5\r\n") && raw.ends_with("01 02\n"), "{raw}");
+    }
+
+    #[test]
+    fn a_dump_of_a_past_height_is_409_with_the_tip() {
+        let (_dir, addr, handle) = serving();
+        let (status, body) = get_path(addr, "/v1/rw/state/3/object_flags");
+        handle.stop();
+        assert_eq!((status, body.contains("\"tip\":5")), (409, true));
+    }
+
+    #[test]
+    fn an_unknown_relation_is_404() {
+        let (_dir, addr, handle) = serving();
+        let (status, _) = get_path(addr, "/v1/rw/state/5/nope");
+        handle.stop();
+        assert_eq!(status, 404);
+    }
+
+    #[test]
+    fn the_genesis_record_is_served_when_the_state_directory_has_one() {
+        let (dir, addr, handle) = serving();
+        assert_eq!(get_path(addr, "/v1/rw/genesis").0, 404);
+        std::fs::write(dir.path().join("genesis.cbor"), b"\x01").unwrap();
+        let (status, body) = get_path(addr, "/v1/rw/genesis");
+        handle.stop();
+        assert_eq!((status, body.as_bytes()), (200, &b"\x01"[..]));
+    }
+
+    #[test]
+    fn only_get_is_served_and_unknown_routes_are_404() {
+        let (_dir, addr, handle) = serving();
+        let post = get(addr, "POST /v1/rw/state/3 HTTP/1.1\r\nHost: x\r\n\r\n").0;
+        let other = get_path(addr, "/v1/other").0;
+        handle.stop();
+        assert_eq!((post, other), (405, 404));
+    }
+
+    #[test]
+    fn a_stopped_sequencer_answers_503_to_a_dump() {
+        let (requests, queue) = flume::unbounded::<StateRequest>();
+        drop(queue);
+        let dir = tempfile::tempdir().unwrap();
+        let handle = handle(requests);
+        let (addr, _thread) = serve("127.0.0.1:0", handle.clone(), dir.path()).unwrap();
+        let (status, _) = get_path(addr, "/v1/rw/state/1/object_flags");
+        handle.stop();
+        assert_eq!(status, 503);
+    }
+
+    #[test]
+    fn entries_text_is_key_space_value_per_line() {
+        let relation = CanonicalRelation {
+            name: "object_flags",
+            entries: vec![(vec![1, 2], vec![0xff]), (vec![3], vec![])],
+        };
+        assert_eq!(entries_text(&relation), b"0102 ff\n03 \n");
+    }
 }

@@ -350,13 +350,16 @@ impl BlockLoop {
         } in requests
         {
             let tip = self.sequencer().tip().height;
-            let answer = if height != tip {
+            let answer = if height.is_some_and(|h| h != tip) {
                 StateReply::NotTip { tip }
             } else if !moor_db::state_root::RELATIONS.contains(&relation.as_str()) {
                 StateReply::UnknownRelation
             } else {
                 match self.sequencer().driver().canonical_relation(&relation) {
-                    Ok(canonical) => StateReply::Entries(entries_text(&canonical)),
+                    Ok(canonical) => StateReply::Entries {
+                        height: tip,
+                        body: entries_text(&canonical),
+                    },
                     Err(e) => StateReply::Failed(e.to_string()),
                 }
             };
