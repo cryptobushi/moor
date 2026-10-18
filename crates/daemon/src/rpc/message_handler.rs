@@ -162,6 +162,9 @@ pub trait MessageHandler: RuntimeApi + Send + Sync {
     ) {
     }
 
+    /// Sequencer mode: remember the latest seal notice for `RequestChainStatus`.
+    fn record_seal(&self, _notice: moor_kernel::tasks::sequencer::SealNotice) {}
+
     /// Switch the player for the given connection object to the new player.
     fn switch_player(
         &self,
@@ -201,6 +204,8 @@ pub struct RpcMessageHandler {
     pub(crate) sequencer: std::sync::OnceLock<crate::sequencer::SequencerHandle>,
     /// Sequencer mode with `--dev-identity`: the daemon signs for the development player.
     pub(crate) dev_signer: std::sync::OnceLock<Arc<crate::sequencer::dev_signer::DevSigner>>,
+    /// Sequencer mode: the latest seal notice, for `RequestChainStatus`.
+    pub(crate) last_seal: std::sync::Mutex<Option<moor_kernel::tasks::sequencer::SealNotice>>,
 }
 
 impl RpcMessageHandler {
@@ -255,6 +260,7 @@ impl RpcMessageHandler {
             signed_sessions: Default::default(),
             sequencer: Default::default(),
             dev_signer: Default::default(),
+            last_seal: Default::default(),
         }
     }
 }
@@ -484,6 +490,10 @@ impl MessageHandler for RpcMessageHandler {
         if let Some(dev_signer) = dev_signer {
             let _ = self.dev_signer.set(dev_signer);
         }
+    }
+
+    fn record_seal(&self, notice: moor_kernel::tasks::sequencer::SealNotice) {
+        *self.last_seal.lock().unwrap_or_else(|e| e.into_inner()) = Some(notice);
     }
 
     fn switch_player(

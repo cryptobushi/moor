@@ -292,6 +292,20 @@ pub struct EventStreamRequest {
     pub limit: usize,
 }
 
+/// What every RuneWorld host shows (ADR 0006 decision 8, ADR 0004 ratification note 1): the
+/// sealed and published heights, the sealed tip, the envelope signing domain, and the daemon's fork
+/// commit for the source offer. Heights are 0 and hashes empty when the daemon is not a sequencer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChainStatus {
+    pub sequencer: bool,
+    pub sealed_height: u64,
+    pub published_height: u64,
+    pub header_hash: Vec<u8>,
+    pub state_root: Vec<u8>,
+    pub domain_salt: [u8; 32],
+    pub fork_commit: String,
+}
+
 /// Stream metadata and optional serialized ClientEvent payloads.
 #[derive(Debug, Clone)]
 pub struct EventStreamState {
@@ -668,6 +682,8 @@ pub enum ClientRequest {
         timeout: Option<Duration>,
     },
     InvokeWelcomeMessage,
+    /// RuneWorld: the chain status every host shows (heights, source commit). Public.
+    RequestChainStatus,
     BatchWorldState {
         auth_token: AuthToken,
         actions: Vec<BatchActionEntry>,
@@ -683,6 +699,8 @@ pub enum ClientRequest {
 #[derive(Debug, Clone)]
 pub enum ClientReply {
     EventStream(EventStreamState),
+    /// RuneWorld: reply to `RequestChainStatus`.
+    ChainStatus(ChainStatus),
     NewConnection {
         client_token: ClientToken,
         connection_obj: Obj,

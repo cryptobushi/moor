@@ -714,7 +714,8 @@ union HostClientToDaemonMessageUnion {
     ReplayClientEvents,
     VerifiedOAuthLogin,
     EventStreamRequest,
-    ClientData
+    ClientData,
+    RequestChainStatus
 }
 
 table ConnectionEstablish {
@@ -948,6 +949,11 @@ table InvokeSystemHandler {
 table InvokeWelcomeMessage {
 }
 
+// RuneWorld (ADR 0006 decision 8, ADR 0004 note 1): what every host shows. Public; needs no
+// credentials and changes nothing.
+table RequestChainStatus {
+}
+
 table HostClientToDaemonMessage {
     message: HostClientToDaemonMessageUnion (required);
 }
@@ -984,7 +990,8 @@ union DaemonToClientReplyUnion {
     InvocationResponse,
     BatchWorldStateReply,
     ClientEvents,
-    EventStreamState
+    EventStreamState,
+    ChainStatus
 }
 
 table NewConnection {
@@ -1013,6 +1020,18 @@ table SysPropValue {
 
 table TaskSubmitted {
     task_id: uint64;
+}
+
+// RuneWorld chain status (reply to RequestChainStatus). Heights are 0 and the byte fields empty
+// when the daemon is not a sequencer.
+table ChainStatus {
+    sequencer: bool;
+    sealed_height: uint64;
+    published_height: uint64;
+    header_hash: [ubyte];   // header hash of the highest sealed block (32 bytes, or empty)
+    state_root: [ubyte];    // state root at the highest sealed block (32 bytes, or empty)
+    domain_salt: [ubyte] (required);  // the envelope signing domain's salt (32 bytes)
+    fork_commit: string (required);   // git commit of the daemon build (the source offer)
 }
 
 table InputThanks {

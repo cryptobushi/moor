@@ -34,7 +34,7 @@ use moor_runtime_api::{
     mk_host_pong_msg, mk_invoke_system_handler_msg, mk_invoke_verb_capture_msg, mk_invoke_verb_msg,
     mk_invoke_welcome_message_msg, mk_list_objects_msg, mk_login_command_msg, mk_out_of_band_msg,
     mk_program_msg, mk_properties_msg, mk_reattach_msg, mk_register_host_msg,
-    mk_request_current_presentations_msg, mk_request_history_msg,
+    mk_request_chain_status_msg, mk_request_current_presentations_msg, mk_request_history_msg,
     mk_request_performance_counters_msg, mk_request_sys_prop_msg, mk_requested_input_msg,
     mk_resolve_msg, mk_retrieve_msg, mk_set_client_attribute_msg, mk_set_event_log_pubkey_msg,
     mk_update_property_msg, mk_verbs_msg, obj_fb, read_reply_result, rpc_message_error_from_ref,
@@ -436,6 +436,7 @@ fn encode_client_request(
             })?
         }
         ClientRequest::InvokeWelcomeMessage => mk_invoke_welcome_message_msg(),
+        ClientRequest::RequestChainStatus => mk_request_chain_status_msg(),
         ClientRequest::BatchWorldState {
             auth_token,
             actions,
@@ -656,6 +657,23 @@ fn decode_client_reply_ref(
         U::ThanksPong(tp) => {
             let timestamp = tp.timestamp().unwrap_or(0);
             ClientReply::ThanksPong { timestamp }
+        }
+        U::ChainStatus(status) => {
+            let decode_error = |e| RpcError::CouldNotDecode(format!("Invalid chain status: {e}"));
+            let bytes = |v: Option<&[u8]>| v.map(<[u8]>::to_vec).unwrap_or_default();
+            let salt = status.domain_salt().map_err(decode_error)?;
+            let domain_salt: [u8; 32] = salt.try_into().map_err(|_| {
+                RpcError::CouldNotDecode(format!("domain salt is {} bytes, not 32", salt.len()))
+            })?;
+            ClientReply::ChainStatus(api::ChainStatus {
+                sequencer: status.sequencer().map_err(decode_error)?,
+                sealed_height: status.sealed_height().map_err(decode_error)?,
+                published_height: status.published_height().map_err(decode_error)?,
+                header_hash: bytes(status.header_hash().map_err(decode_error)?),
+                state_root: bytes(status.state_root().map_err(decode_error)?),
+                domain_salt,
+                fork_commit: status.fork_commit().map_err(decode_error)?.to_string(),
+            })
         }
         U::EventStreamState(state) => {
             let decode_error =
@@ -1624,6 +1642,39 @@ mod tests {
         assert_eq!(decoded.acknowledged_sequence, 42);
         assert_eq!(decoded.available_after, 42);
         assert_eq!(decoded.latest_sequence, 43);
+    }
+
+    #[test]
+    fn chain_status_round_trip() {
+        use super::{ClientRequest, encode_client_request, moor_rpc};
+        use moor_runtime_api::api::ChainStatus;
+        use moor_runtime_api::api_codec::decode_client_request;
+        use planus::ReadAsRoot;
+        let encoded = encode_client_request(ClientRequest::RequestChainStatus).unwrap();
+        let mut builder = planus::Builder::new();
+        let bytes = builder.finish(&encoded, None);
+        assert!(matches!(
+            decode_client_request(
+                moor_rpc::HostClientToDaemonMessageRef::read_as_root(bytes).unwrap()
+            )
+            .unwrap(),
+            ClientRequest::RequestChainStatus
+        ));
+        let original = ChainStatus {
+            sequencer: true,
+            sealed_height: 1_234,
+            published_height: 1_230,
+            header_hash: vec![0xab; 32],
+            state_root: vec![0xcd; 32],
+            domain_salt: [7; 32],
+            fork_commit: "0ad1f89c3".into(),
+        };
+        let bytes =
+            encode_client_success_bytes(ClientReply::ChainStatus(original.clone())).unwrap();
+        let ClientReply::ChainStatus(decoded) = decode_client_reply_bytes(&bytes).unwrap() else {
+            panic!("wrong reply")
+        };
+        assert_eq!(decoded, original);
     }
 
     #[test]

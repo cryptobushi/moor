@@ -687,6 +687,15 @@ pub fn mk_invoke_welcome_message_msg() -> rpc::HostClientToDaemonMessage {
     }
 }
 
+/// RuneWorld: ask for the chain status (heights, signing domain, fork commit).
+pub fn mk_request_chain_status_msg() -> rpc::HostClientToDaemonMessage {
+    rpc::HostClientToDaemonMessage {
+        message: rpc::HostClientToDaemonMessageUnion::RequestChainStatus(Box::new(
+            rpc::RequestChainStatus {},
+        )),
+    }
+}
+
 /// A single action entry for a batch world state request.
 pub struct BatchAction {
     pub id: String,

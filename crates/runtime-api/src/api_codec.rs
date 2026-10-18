@@ -1221,6 +1221,7 @@ pub fn decode_client_request(
             })
         }
         U::InvokeWelcomeMessage(_) => Ok(ClientRequest::InvokeWelcomeMessage),
+        U::RequestChainStatus(_) => Ok(ClientRequest::RequestChainStatus),
         U::BatchWorldState(batch) => {
             let auth_token = batch
                 .auth_token()
@@ -1525,6 +1526,17 @@ pub fn encode_client_reply(
             }
         }
         ClientReply::ThanksPong { timestamp } => mk_thanks_pong_reply(timestamp),
+        ClientReply::ChainStatus(status) => moor_rpc::DaemonToClientReply {
+            reply: U::ChainStatus(Box::new(moor_rpc::ChainStatus {
+                sequencer: status.sequencer,
+                sealed_height: status.sealed_height,
+                published_height: status.published_height,
+                header_hash: Some(status.header_hash),
+                state_root: Some(status.state_root),
+                domain_salt: status.domain_salt.to_vec(),
+                fork_commit: status.fork_commit,
+            })),
+        },
         ClientReply::EventStream(state) => moor_rpc::DaemonToClientReply {
             reply: U::EventStreamState(Box::new(moor_rpc::EventStreamState {
                 stream_id: uuid_fb(state.stream_id),

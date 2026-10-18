@@ -137,7 +137,9 @@ impl RpcServer {
     /// Sequencer mode: broadcast a seal notice on the clients' broadcast topic.
     pub fn seal_notifier(&self) -> Box<dyn Fn(moor_kernel::tasks::sequencer::SealNotice) + Send> {
         let transport = self.transport.clone();
+        let message_handler = self.message_handler.clone();
         Box::new(move |notice| {
+            message_handler.record_seal(notice);
             let event = moor_runtime_api::api::BroadcastEvent::SealNotice {
                 height: notice.height,
                 header_hash: notice.header_hash,

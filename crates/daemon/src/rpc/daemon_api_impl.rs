@@ -931,6 +931,8 @@ impl RuntimeApi for RpcMessageHandler {
                 )
             }
 
+            ClientRequest::RequestChainStatus => Ok(ClientReply::ChainStatus(self.chain_status())),
+
             ClientRequest::InvokeWelcomeMessage => {
                 // The welcome message is what an unauthenticated client is shown before it has any
                 // credentials to authenticate with, so this is the one invocation that carries no

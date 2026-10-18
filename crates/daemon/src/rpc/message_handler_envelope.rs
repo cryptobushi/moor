@@ -32,7 +32,10 @@ use moor_kernel::{
     SchedulerClient,
     tasks::envelope_admission::{Admitted, EnvelopeRun, OnAdmitted},
 };
-use moor_runtime_api::{RpcMessageError, api::ClientReply, api::ConnectType};
+use moor_runtime_api::{
+    RpcMessageError,
+    api::{ChainStatus, ClientReply, ConnectType},
+};
 use moor_var::{Obj, Var};
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -163,6 +166,29 @@ impl RpcMessageHandler {
         Ok(ClientReply::TaskSubmitted {
             task_id: run.task_id.unwrap_or(0) as u64,
         })
+    }
+
+    /// What every host shows (ADR 0006 decision 8): heights, the sealed tip, the signing domain
+    /// and the daemon's fork commit (the source offer, ADR 0004 note 1). Public and read-only.
+    pub(crate) fn chain_status(&self) -> ChainStatus {
+        let (sealed_height, published_height) = self
+            .sequencer
+            .get()
+            .map_or((0, 0), crate::sequencer::SequencerHandle::heights);
+        let last = *self.last_seal.lock().unwrap_or_else(|e| e.into_inner());
+        let (header_hash, state_root) = last
+            .filter(|notice| notice.height == sealed_height && sealed_height > 0)
+            .map(|notice| (notice.header_hash.to_vec(), notice.state_root.to_vec()))
+            .unwrap_or_default();
+        ChainStatus {
+            sequencer: self.sequencer.get().is_some(),
+            sealed_height,
+            published_height,
+            header_hash,
+            state_root,
+            domain_salt: self.config.deterministic.domain_salt,
+            fork_commit: moor_common::build::commit().to_string(),
+        }
     }
 
     /// Disconnect every client that connected through one of `sessions` of `player`.

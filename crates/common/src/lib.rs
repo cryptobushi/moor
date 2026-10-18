@@ -33,6 +33,14 @@ pub mod build {
     /// Package version from Cargo.toml
     pub const PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+    /// Full git commit hash of the build, or "unknown". RuneWorld hosts link to it as the
+    /// AGPL-3.0 section 13 source offer (ADR 0004 ratification note 1).
+    pub fn commit() -> &'static str {
+        option_env!("VERGEN_GIT_SHA")
+            .filter(|sha| !sha.is_empty() && sha.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .unwrap_or("unknown")
+    }
+
     /// Short git commit hash (first 7 characters of SHA)
     pub fn short_commit() -> &'static str {
         option_env!("VERGEN_GIT_SHA")

@@ -66350,6 +66350,9 @@ mod root {
 
             /// The variant of type `ClientData` in the union `HostClientToDaemonMessageUnion`
             ClientData(::planus::alloc::boxed::Box<self::ClientData>),
+
+            /// The variant of type `RequestChainStatus` in the union `HostClientToDaemonMessageUnion`
+            RequestChainStatus(::planus::alloc::boxed::Box<self::RequestChainStatus>),
         }
 
         impl HostClientToDaemonMessageUnion {
@@ -66622,6 +66625,14 @@ mod root {
             ) -> ::planus::UnionOffset<Self> {
                 ::planus::UnionOffset::new(33, value.prepare(builder).downcast())
             }
+
+            #[inline]
+            pub fn create_request_chain_status(
+                builder: &mut ::planus::Builder,
+                value: impl ::planus::WriteAsOffset<self::RequestChainStatus>,
+            ) -> ::planus::UnionOffset<Self> {
+                ::planus::UnionOffset::new(34, value.prepare(builder).downcast())
+            }
         }
 
         impl ::planus::WriteAsUnion<HostClientToDaemonMessageUnion> for HostClientToDaemonMessageUnion {
@@ -66685,6 +66696,9 @@ mod root {
                         Self::create_event_stream_request(builder, value)
                     }
                     Self::ClientData(value) => Self::create_client_data(builder, value),
+                    Self::RequestChainStatus(value) => {
+                        Self::create_request_chain_status(builder, value)
+                    }
                 }
             }
         }
@@ -67101,6 +67115,18 @@ mod root {
             ) -> HostClientToDaemonMessageUnionBuilder<::planus::Initialized<33, T>>
             where
                 T: ::planus::WriteAsOffset<self::ClientData>,
+            {
+                HostClientToDaemonMessageUnionBuilder(::planus::Initialized(value))
+            }
+
+            /// Creates an instance of the [`RequestChainStatus` variant](HostClientToDaemonMessageUnion#variant.RequestChainStatus).
+            #[inline]
+            pub fn request_chain_status<T>(
+                self,
+                value: T,
+            ) -> HostClientToDaemonMessageUnionBuilder<::planus::Initialized<34, T>>
+            where
+                T: ::planus::WriteAsOffset<self::RequestChainStatus>,
             {
                 HostClientToDaemonMessageUnionBuilder(::planus::Initialized(value))
             }
@@ -68044,6 +68070,34 @@ mod root {
                 ::core::option::Option::Some(::planus::WriteAsUnion::prepare(self, builder))
             }
         }
+        impl<T> ::planus::WriteAsUnion<HostClientToDaemonMessageUnion>
+            for HostClientToDaemonMessageUnionBuilder<::planus::Initialized<34, T>>
+        where
+            T: ::planus::WriteAsOffset<self::RequestChainStatus>,
+        {
+            #[inline]
+            fn prepare(
+                &self,
+                builder: &mut ::planus::Builder,
+            ) -> ::planus::UnionOffset<HostClientToDaemonMessageUnion> {
+                ::planus::UnionOffset::new(34, (self.0).0.prepare(builder).downcast())
+            }
+        }
+
+        impl<T> ::planus::WriteAsOptionalUnion<HostClientToDaemonMessageUnion>
+            for HostClientToDaemonMessageUnionBuilder<::planus::Initialized<34, T>>
+        where
+            T: ::planus::WriteAsOffset<self::RequestChainStatus>,
+        {
+            #[inline]
+            fn prepare(
+                &self,
+                builder: &mut ::planus::Builder,
+            ) -> ::core::option::Option<::planus::UnionOffset<HostClientToDaemonMessageUnion>>
+            {
+                ::core::option::Option::Some(::planus::WriteAsUnion::prepare(self, builder))
+            }
+        }
 
         /// Reference to a deserialized [HostClientToDaemonMessageUnion].
         #[derive(Copy, Clone, Debug)]
@@ -68081,6 +68135,7 @@ mod root {
             VerifiedOAuthLogin(self::VerifiedOAuthLoginRef<'a>),
             EventStreamRequest(self::EventStreamRequestRef<'a>),
             ClientData(self::ClientDataRef<'a>),
+            RequestChainStatus(self::RequestChainStatusRef<'a>),
         }
 
         impl<'a> ::core::convert::TryFrom<HostClientToDaemonMessageUnionRef<'a>>
@@ -68287,6 +68342,12 @@ mod root {
                             ::core::convert::TryFrom::try_from(value)?,
                         ))
                     }
+
+                    HostClientToDaemonMessageUnionRef::RequestChainStatus(value) => {
+                        Self::RequestChainStatus(::planus::alloc::boxed::Box::new(
+                            ::core::convert::TryFrom::try_from(value)?,
+                        ))
+                    }
                 })
             }
         }
@@ -68399,6 +68460,9 @@ mod root {
                     33 => ::core::result::Result::Ok(Self::ClientData(
                         ::planus::TableRead::from_buffer(buffer, field_offset)?,
                     )),
+                    34 => ::core::result::Result::Ok(Self::RequestChainStatus(
+                        ::planus::TableRead::from_buffer(buffer, field_offset)?,
+                    )),
                     _ => {
                         ::core::result::Result::Err(::planus::errors::ErrorKind::UnknownUnionTag {
                             tag,
@@ -68415,7 +68479,7 @@ mod root {
         /// The table `ConnectionEstablish` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `ConnectionEstablish` in the file `moor_rpc.fbs:720`
+        /// * Table `ConnectionEstablish` in the file `moor_rpc.fbs:721`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub struct ConnectionEstablish {
             /// The field `peer_addr` in the table `ConnectionEstablish`
@@ -68946,7 +69010,7 @@ mod root {
         /// The table `Reattach` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `Reattach` in the file `moor_rpc.fbs:728`
+        /// * Table `Reattach` in the file `moor_rpc.fbs:729`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub struct Reattach {
             /// The field `client_token` in the table `Reattach`
@@ -69533,7 +69597,7 @@ mod root {
         /// The table `RequestSysProp` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `RequestSysProp` in the file `moor_rpc.fbs:738`
+        /// * Table `RequestSysProp` in the file `moor_rpc.fbs:739`
         #[derive(
             Clone,
             Debug,
@@ -69873,7 +69937,7 @@ mod root {
         /// The table `VerifiedOAuthLogin` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `VerifiedOAuthLogin` in the file `moor_rpc.fbs:746`
+        /// * Table `VerifiedOAuthLogin` in the file `moor_rpc.fbs:747`
         #[derive(
             Clone,
             Debug,
@@ -70238,7 +70302,7 @@ mod root {
         /// The table `LoginCommand` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `LoginCommand` in the file `moor_rpc.fbs:752`
+        /// * Table `LoginCommand` in the file `moor_rpc.fbs:753`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub struct LoginCommand {
             /// The field `client_token` in the table `LoginCommand`
@@ -70663,7 +70727,7 @@ mod root {
         /// The table `Attach` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `Attach` in the file `moor_rpc.fbs:763`
+        /// * Table `Attach` in the file `moor_rpc.fbs:764`
         #[derive(
             Clone,
             Debug,
@@ -71196,7 +71260,7 @@ mod root {
         /// The table `Verbs` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `Verbs` in the file `moor_rpc.fbs:773`
+        /// * Table `Verbs` in the file `moor_rpc.fbs:774`
         #[derive(
             Clone,
             Debug,
@@ -71515,7 +71579,7 @@ mod root {
         /// The table `ConnectedInvocation` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `ConnectedInvocation` in the file `moor_rpc.fbs:781`
+        /// * Table `ConnectedInvocation` in the file `moor_rpc.fbs:782`
         #[derive(
             Clone,
             Debug,
@@ -71790,7 +71854,7 @@ mod root {
         /// The table `CaptureOutputInvocation` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `CaptureOutputInvocation` in the file `moor_rpc.fbs:792`
+        /// * Table `CaptureOutputInvocation` in the file `moor_rpc.fbs:793`
         #[derive(
             Clone,
             Debug,
@@ -72088,7 +72152,7 @@ mod root {
         /// The union `InvocationMode` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Union `InvocationMode` in the file `moor_rpc.fbs:796`
+        /// * Union `InvocationMode` in the file `moor_rpc.fbs:797`
         #[derive(
             Clone,
             Debug,
@@ -72314,7 +72378,7 @@ mod root {
         /// The table `Command` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `Command` in the file `moor_rpc.fbs:801`
+        /// * Table `Command` in the file `moor_rpc.fbs:802`
         #[derive(
             Clone,
             Debug,
@@ -72660,7 +72724,7 @@ mod root {
         /// The table `InvokeVerb` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `InvokeVerb` in the file `moor_rpc.fbs:808`
+        /// * Table `InvokeVerb` in the file `moor_rpc.fbs:809`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub struct InvokeVerb {
             /// The field `auth_token` in the table `InvokeVerb`
@@ -73040,7 +73104,7 @@ mod root {
         /// The table `Properties` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `Properties` in the file `moor_rpc.fbs:816`
+        /// * Table `Properties` in the file `moor_rpc.fbs:817`
         #[derive(
             Clone,
             Debug,
@@ -73370,7 +73434,7 @@ mod root {
         /// The table `Retrieve` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `Retrieve` in the file `moor_rpc.fbs:822`
+        /// * Table `Retrieve` in the file `moor_rpc.fbs:823`
         #[derive(
             Clone,
             Debug,
@@ -73736,7 +73800,7 @@ mod root {
         /// The table `Program` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `Program` in the file `moor_rpc.fbs:829`
+        /// * Table `Program` in the file `moor_rpc.fbs:830`
         #[derive(
             Clone,
             Debug,
@@ -74085,7 +74149,7 @@ mod root {
         /// The table `RequestedInput` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `RequestedInput` in the file `moor_rpc.fbs:836`
+        /// * Table `RequestedInput` in the file `moor_rpc.fbs:837`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub struct RequestedInput {
             /// The field `client_token` in the table `RequestedInput`
@@ -74428,7 +74492,7 @@ mod root {
         /// The table `OutOfBand` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `OutOfBand` in the file `moor_rpc.fbs:843`
+        /// * Table `OutOfBand` in the file `moor_rpc.fbs:844`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub struct OutOfBand {
             /// The field `client_token` in the table `OutOfBand`
@@ -74804,7 +74868,7 @@ mod root {
         /// The table `ClientData` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `ClientData` in the file `moor_rpc.fbs:852`
+        /// * Table `ClientData` in the file `moor_rpc.fbs:853`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub struct ClientData {
             /// The field `client_token` in the table `ClientData`
@@ -75238,7 +75302,7 @@ mod root {
         /// The table `Eval` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `Eval` in the file `moor_rpc.fbs:861`
+        /// * Table `Eval` in the file `moor_rpc.fbs:862`
         #[derive(
             Clone,
             Debug,
@@ -75545,7 +75609,7 @@ mod root {
         /// The table `Resolve` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `Resolve` in the file `moor_rpc.fbs:867`
+        /// * Table `Resolve` in the file `moor_rpc.fbs:868`
         #[derive(
             Clone,
             Debug,
@@ -75822,7 +75886,7 @@ mod root {
         /// The table `ClientPong` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `ClientPong` in the file `moor_rpc.fbs:872`
+        /// * Table `ClientPong` in the file `moor_rpc.fbs:873`
         #[derive(
             Clone,
             Debug,
@@ -76239,7 +76303,7 @@ mod root {
         /// The table `ReplayClientEvents` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `ReplayClientEvents` in the file `moor_rpc.fbs:880`
+        /// * Table `ReplayClientEvents` in the file `moor_rpc.fbs:881`
         #[derive(
             Clone,
             Debug,
@@ -76618,7 +76682,7 @@ mod root {
         /// The table `RequestHistory` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `RequestHistory` in the file `moor_rpc.fbs:886`
+        /// * Table `RequestHistory` in the file `moor_rpc.fbs:887`
         #[derive(
             Clone,
             Debug,
@@ -76901,7 +76965,7 @@ mod root {
         /// The table `RequestCurrentPresentations` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `RequestCurrentPresentations` in the file `moor_rpc.fbs:891`
+        /// * Table `RequestCurrentPresentations` in the file `moor_rpc.fbs:892`
         #[derive(
             Clone,
             Debug,
@@ -77189,7 +77253,7 @@ mod root {
         /// The table `DismissPresentation` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `DismissPresentation` in the file `moor_rpc.fbs:895`
+        /// * Table `DismissPresentation` in the file `moor_rpc.fbs:896`
         #[derive(
             Clone,
             Debug,
@@ -77499,7 +77563,7 @@ mod root {
         /// The table `SetClientAttribute` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `SetClientAttribute` in the file `moor_rpc.fbs:900`
+        /// * Table `SetClientAttribute` in the file `moor_rpc.fbs:901`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub struct SetClientAttribute {
             /// The field `client_token` in the table `SetClientAttribute`
@@ -77915,7 +77979,7 @@ mod root {
         /// The table `Detach` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `Detach` in the file `moor_rpc.fbs:907`
+        /// * Table `Detach` in the file `moor_rpc.fbs:908`
         #[derive(
             Clone,
             Debug,
@@ -78215,7 +78279,7 @@ mod root {
         /// The table `GetEventLogPublicKey` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `GetEventLogPublicKey` in the file `moor_rpc.fbs:912`
+        /// * Table `GetEventLogPublicKey` in the file `moor_rpc.fbs:913`
         #[derive(
             Clone,
             Debug,
@@ -78490,7 +78554,7 @@ mod root {
         /// The table `SetEventLogPublicKey` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `SetEventLogPublicKey` in the file `moor_rpc.fbs:916`
+        /// * Table `SetEventLogPublicKey` in the file `moor_rpc.fbs:917`
         #[derive(
             Clone,
             Debug,
@@ -78800,7 +78864,7 @@ mod root {
         /// The table `DeleteEventLogHistory` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `DeleteEventLogHistory` in the file `moor_rpc.fbs:921`
+        /// * Table `DeleteEventLogHistory` in the file `moor_rpc.fbs:922`
         #[derive(
             Clone,
             Debug,
@@ -79077,7 +79141,7 @@ mod root {
         /// The table `ListObjects` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `ListObjects` in the file `moor_rpc.fbs:925`
+        /// * Table `ListObjects` in the file `moor_rpc.fbs:926`
         #[derive(
             Clone,
             Debug,
@@ -79332,7 +79396,7 @@ mod root {
         /// The table `UpdateProperty` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `UpdateProperty` in the file `moor_rpc.fbs:929`
+        /// * Table `UpdateProperty` in the file `moor_rpc.fbs:930`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub struct UpdateProperty {
             /// The field `auth_token` in the table `UpdateProperty`
@@ -79675,7 +79739,7 @@ mod root {
         /// The table `InvokeSystemHandler` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `InvokeSystemHandler` in the file `moor_rpc.fbs:936`
+        /// * Table `InvokeSystemHandler` in the file `moor_rpc.fbs:937`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub struct InvokeSystemHandler {
             /// The field `host_id` in the table `InvokeSystemHandler`
@@ -80130,7 +80194,7 @@ mod root {
         /// The table `InvokeWelcomeMessage` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `InvokeWelcomeMessage` in the file `moor_rpc.fbs:948`
+        /// * Table `InvokeWelcomeMessage` in the file `moor_rpc.fbs:949`
         #[derive(
             Clone,
             Debug,
@@ -80357,10 +80421,238 @@ mod root {
             }
         }
 
+        /// The table `RequestChainStatus` in the namespace `MoorRpc`
+        ///
+        /// Generated from these locations:
+        /// * Table `RequestChainStatus` in the file `moor_rpc.fbs:954`
+        #[derive(
+            Clone,
+            Debug,
+            PartialEq,
+            PartialOrd,
+            Eq,
+            Ord,
+            Hash,
+            ::serde::Serialize,
+            ::serde::Deserialize,
+        )]
+        pub struct RequestChainStatus {}
+
+        #[allow(clippy::derivable_impls)]
+        impl ::core::default::Default for RequestChainStatus {
+            fn default() -> Self {
+                Self {}
+            }
+        }
+
+        impl RequestChainStatus {
+            /// Creates a [RequestChainStatusBuilder] for serializing an instance of this table.
+            #[inline]
+            pub fn builder() -> RequestChainStatusBuilder<()> {
+                RequestChainStatusBuilder(())
+            }
+
+            #[allow(clippy::too_many_arguments)]
+            pub fn create(builder: &mut ::planus::Builder) -> ::planus::Offset<Self> {
+                let table_writer: ::planus::table_writer::TableWriter<4> =
+                    ::core::default::Default::default();
+                unsafe {
+                    table_writer.finish(builder, |_table_writer| {});
+                }
+                builder.current_offset()
+            }
+        }
+
+        impl ::planus::WriteAs<::planus::Offset<RequestChainStatus>> for RequestChainStatus {
+            type Prepared = ::planus::Offset<Self>;
+
+            #[inline]
+            fn prepare(
+                &self,
+                builder: &mut ::planus::Builder,
+            ) -> ::planus::Offset<RequestChainStatus> {
+                ::planus::WriteAsOffset::prepare(self, builder)
+            }
+        }
+
+        impl ::planus::WriteAsOptional<::planus::Offset<RequestChainStatus>> for RequestChainStatus {
+            type Prepared = ::planus::Offset<Self>;
+
+            #[inline]
+            fn prepare(
+                &self,
+                builder: &mut ::planus::Builder,
+            ) -> ::core::option::Option<::planus::Offset<RequestChainStatus>> {
+                ::core::option::Option::Some(::planus::WriteAsOffset::prepare(self, builder))
+            }
+        }
+
+        impl ::planus::WriteAsOffset<RequestChainStatus> for RequestChainStatus {
+            #[inline]
+            fn prepare(
+                &self,
+                builder: &mut ::planus::Builder,
+            ) -> ::planus::Offset<RequestChainStatus> {
+                RequestChainStatus::create(builder)
+            }
+        }
+
+        /// Builder for serializing an instance of the [RequestChainStatus] type.
+        ///
+        /// Can be created using the [RequestChainStatus::builder] method.
+        #[derive(Debug)]
+        #[must_use]
+        pub struct RequestChainStatusBuilder<State>(State);
+
+        impl RequestChainStatusBuilder<()> {
+            /// Finish writing the builder to get an [Offset](::planus::Offset) to a serialized [RequestChainStatus].
+            #[inline]
+            pub fn finish(
+                self,
+                builder: &mut ::planus::Builder,
+            ) -> ::planus::Offset<RequestChainStatus>
+            where
+                Self: ::planus::WriteAsOffset<RequestChainStatus>,
+            {
+                ::planus::WriteAsOffset::prepare(&self, builder)
+            }
+        }
+
+        impl ::planus::WriteAs<::planus::Offset<RequestChainStatus>> for RequestChainStatusBuilder<()> {
+            type Prepared = ::planus::Offset<RequestChainStatus>;
+
+            #[inline]
+            fn prepare(
+                &self,
+                builder: &mut ::planus::Builder,
+            ) -> ::planus::Offset<RequestChainStatus> {
+                ::planus::WriteAsOffset::prepare(self, builder)
+            }
+        }
+
+        impl ::planus::WriteAsOptional<::planus::Offset<RequestChainStatus>>
+            for RequestChainStatusBuilder<()>
+        {
+            type Prepared = ::planus::Offset<RequestChainStatus>;
+
+            #[inline]
+            fn prepare(
+                &self,
+                builder: &mut ::planus::Builder,
+            ) -> ::core::option::Option<::planus::Offset<RequestChainStatus>> {
+                ::core::option::Option::Some(::planus::WriteAsOffset::prepare(self, builder))
+            }
+        }
+
+        impl ::planus::WriteAsOffset<RequestChainStatus> for RequestChainStatusBuilder<()> {
+            #[inline]
+            fn prepare(
+                &self,
+                builder: &mut ::planus::Builder,
+            ) -> ::planus::Offset<RequestChainStatus> {
+                RequestChainStatus::create(builder)
+            }
+        }
+
+        /// Reference to a deserialized [RequestChainStatus].
+        #[derive(Copy, Clone)]
+        pub struct RequestChainStatusRef<'a>(#[allow(dead_code)] ::planus::table_reader::Table<'a>);
+
+        impl<'a> RequestChainStatusRef<'a> {}
+
+        impl<'a> ::core::fmt::Debug for RequestChainStatusRef<'a> {
+            fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+                let mut f = f.debug_struct("RequestChainStatusRef");
+
+                f.finish()
+            }
+        }
+
+        impl<'a> ::core::convert::TryFrom<RequestChainStatusRef<'a>> for RequestChainStatus {
+            type Error = ::planus::Error;
+
+            fn try_from(_value: RequestChainStatusRef<'a>) -> ::planus::Result<Self> {
+                ::core::result::Result::Ok(Self {})
+            }
+        }
+
+        impl<'a> ::planus::TableRead<'a> for RequestChainStatusRef<'a> {
+            #[inline]
+            fn from_buffer(
+                buffer: ::planus::SliceWithStartOffset<'a>,
+                offset: usize,
+            ) -> ::core::result::Result<Self, ::planus::errors::ErrorKind> {
+                ::core::result::Result::Ok(Self(::planus::table_reader::Table::from_buffer(
+                    buffer, offset,
+                )?))
+            }
+        }
+
+        impl<'a> ::planus::VectorReadInner<'a> for RequestChainStatusRef<'a> {
+            type Error = ::planus::Error;
+            const STRIDE: usize = 4;
+
+            unsafe fn from_buffer(
+                buffer: ::planus::SliceWithStartOffset<'a>,
+                offset: usize,
+            ) -> ::planus::Result<Self> {
+                ::planus::TableRead::from_buffer(buffer, offset).map_err(|error_kind| {
+                    error_kind.with_error_location(
+                        "[RequestChainStatusRef]",
+                        "get",
+                        buffer.offset_from_start,
+                    )
+                })
+            }
+        }
+
+        /// # Safety
+        /// The planus compiler generates implementations that initialize
+        /// the bytes in `write_values`.
+        unsafe impl ::planus::VectorWrite<::planus::Offset<RequestChainStatus>> for RequestChainStatus {
+            type Value = ::planus::Offset<RequestChainStatus>;
+            const STRIDE: usize = 4;
+            #[inline]
+            fn prepare(&self, builder: &mut ::planus::Builder) -> Self::Value {
+                ::planus::WriteAs::prepare(self, builder)
+            }
+
+            #[inline]
+            unsafe fn write_values(
+                values: &[::planus::Offset<RequestChainStatus>],
+                bytes: *mut ::core::mem::MaybeUninit<u8>,
+                buffer_position: u32,
+            ) {
+                let bytes = bytes as *mut [::core::mem::MaybeUninit<u8>; 4];
+                for (i, v) in ::core::iter::Iterator::enumerate(values.iter()) {
+                    ::planus::WriteAsPrimitive::write(
+                        v,
+                        ::planus::Cursor::new(unsafe { &mut *bytes.add(i) }),
+                        buffer_position - (Self::STRIDE * i) as u32,
+                    );
+                }
+            }
+        }
+
+        impl<'a> ::planus::ReadAsRoot<'a> for RequestChainStatusRef<'a> {
+            fn read_as_root(slice: &'a [u8]) -> ::planus::Result<Self> {
+                ::planus::TableRead::from_buffer(
+                    ::planus::SliceWithStartOffset {
+                        buffer: slice,
+                        offset_from_start: 0,
+                    },
+                    0,
+                )
+                .map_err(|error_kind| {
+                    error_kind.with_error_location("[RequestChainStatusRef]", "read_as_root", 0)
+                })
+            }
+        }
+
         /// The table `HostClientToDaemonMessage` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `HostClientToDaemonMessage` in the file `moor_rpc.fbs:951`
+        /// * Table `HostClientToDaemonMessage` in the file `moor_rpc.fbs:957`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub struct HostClientToDaemonMessage {
             /// The field `message` in the table `HostClientToDaemonMessage`
@@ -80626,7 +80918,7 @@ mod root {
         /// The union `DaemonToClientReplyUnion` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Union `DaemonToClientReplyUnion` in the file `moor_rpc.fbs:959`
+        /// * Union `DaemonToClientReplyUnion` in the file `moor_rpc.fbs:965`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub enum DaemonToClientReplyUnion {
             /// The variant of type `NewConnection` in the union `DaemonToClientReplyUnion`
@@ -80714,6 +81006,9 @@ mod root {
 
             /// The variant of type `EventStreamState` in the union `DaemonToClientReplyUnion`
             EventStreamState(::planus::alloc::boxed::Box<self::EventStreamState>),
+
+            /// The variant of type `ChainStatus` in the union `DaemonToClientReplyUnion`
+            ChainStatus(::planus::alloc::boxed::Box<self::ChainStatus>),
         }
 
         impl DaemonToClientReplyUnion {
@@ -80946,6 +81241,14 @@ mod root {
             ) -> ::planus::UnionOffset<Self> {
                 ::planus::UnionOffset::new(28, value.prepare(builder).downcast())
             }
+
+            #[inline]
+            pub fn create_chain_status(
+                builder: &mut ::planus::Builder,
+                value: impl ::planus::WriteAsOffset<self::ChainStatus>,
+            ) -> ::planus::UnionOffset<Self> {
+                ::planus::UnionOffset::new(29, value.prepare(builder).downcast())
+            }
         }
 
         impl ::planus::WriteAsUnion<DaemonToClientReplyUnion> for DaemonToClientReplyUnion {
@@ -81004,6 +81307,7 @@ mod root {
                     Self::EventStreamState(value) => {
                         Self::create_event_stream_state(builder, value)
                     }
+                    Self::ChainStatus(value) => Self::create_chain_status(builder, value),
                 }
             }
         }
@@ -81358,6 +81662,18 @@ mod root {
             ) -> DaemonToClientReplyUnionBuilder<::planus::Initialized<28, T>>
             where
                 T: ::planus::WriteAsOffset<self::EventStreamState>,
+            {
+                DaemonToClientReplyUnionBuilder(::planus::Initialized(value))
+            }
+
+            /// Creates an instance of the [`ChainStatus` variant](DaemonToClientReplyUnion#variant.ChainStatus).
+            #[inline]
+            pub fn chain_status<T>(
+                self,
+                value: T,
+            ) -> DaemonToClientReplyUnionBuilder<::planus::Initialized<29, T>>
+            where
+                T: ::planus::WriteAsOffset<self::ChainStatus>,
             {
                 DaemonToClientReplyUnionBuilder(::planus::Initialized(value))
             }
@@ -82161,6 +82477,34 @@ mod root {
                 ::core::option::Option::Some(::planus::WriteAsUnion::prepare(self, builder))
             }
         }
+        impl<T> ::planus::WriteAsUnion<DaemonToClientReplyUnion>
+            for DaemonToClientReplyUnionBuilder<::planus::Initialized<29, T>>
+        where
+            T: ::planus::WriteAsOffset<self::ChainStatus>,
+        {
+            #[inline]
+            fn prepare(
+                &self,
+                builder: &mut ::planus::Builder,
+            ) -> ::planus::UnionOffset<DaemonToClientReplyUnion> {
+                ::planus::UnionOffset::new(29, (self.0).0.prepare(builder).downcast())
+            }
+        }
+
+        impl<T> ::planus::WriteAsOptionalUnion<DaemonToClientReplyUnion>
+            for DaemonToClientReplyUnionBuilder<::planus::Initialized<29, T>>
+        where
+            T: ::planus::WriteAsOffset<self::ChainStatus>,
+        {
+            #[inline]
+            fn prepare(
+                &self,
+                builder: &mut ::planus::Builder,
+            ) -> ::core::option::Option<::planus::UnionOffset<DaemonToClientReplyUnion>>
+            {
+                ::core::option::Option::Some(::planus::WriteAsUnion::prepare(self, builder))
+            }
+        }
 
         /// Reference to a deserialized [DaemonToClientReplyUnion].
         #[derive(Copy, Clone, Debug)]
@@ -82193,6 +82537,7 @@ mod root {
             BatchWorldStateReply(self::BatchWorldStateReplyRef<'a>),
             ClientEvents(self::ClientEventsRef<'a>),
             EventStreamState(self::EventStreamStateRef<'a>),
+            ChainStatus(self::ChainStatusRef<'a>),
         }
 
         impl<'a> ::core::convert::TryFrom<DaemonToClientReplyUnionRef<'a>> for DaemonToClientReplyUnion {
@@ -82367,6 +82712,12 @@ mod root {
                             ::core::convert::TryFrom::try_from(value)?,
                         ))
                     }
+
+                    DaemonToClientReplyUnionRef::ChainStatus(value) => {
+                        Self::ChainStatus(::planus::alloc::boxed::Box::new(
+                            ::core::convert::TryFrom::try_from(value)?,
+                        ))
+                    }
                 })
             }
         }
@@ -82462,6 +82813,9 @@ mod root {
                     28 => ::core::result::Result::Ok(Self::EventStreamState(
                         ::planus::TableRead::from_buffer(buffer, field_offset)?,
                     )),
+                    29 => ::core::result::Result::Ok(Self::ChainStatus(
+                        ::planus::TableRead::from_buffer(buffer, field_offset)?,
+                    )),
                     _ => {
                         ::core::result::Result::Err(::planus::errors::ErrorKind::UnknownUnionTag {
                             tag,
@@ -82478,7 +82832,7 @@ mod root {
         /// The table `NewConnection` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `NewConnection` in the file `moor_rpc.fbs:990`
+        /// * Table `NewConnection` in the file `moor_rpc.fbs:997`
         #[derive(
             Clone,
             Debug,
@@ -82760,7 +83114,7 @@ mod root {
         /// The table `LoginResult` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `LoginResult` in the file `moor_rpc.fbs:995`
+        /// * Table `LoginResult` in the file `moor_rpc.fbs:1002`
         #[derive(
             Clone,
             Debug,
@@ -83251,7 +83605,7 @@ mod root {
         /// The table `AttachResult` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `AttachResult` in the file `moor_rpc.fbs:1003`
+        /// * Table `AttachResult` in the file `moor_rpc.fbs:1010`
         #[derive(
             Clone,
             Debug,
@@ -83693,7 +84047,7 @@ mod root {
         /// The table `SysPropValue` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `SysPropValue` in the file `moor_rpc.fbs:1010`
+        /// * Table `SysPropValue` in the file `moor_rpc.fbs:1017`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub struct SysPropValue {
             /// The field `value` in the table `SysPropValue`
@@ -83958,7 +84312,7 @@ mod root {
         /// The table `TaskSubmitted` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `TaskSubmitted` in the file `moor_rpc.fbs:1014`
+        /// * Table `TaskSubmitted` in the file `moor_rpc.fbs:1021`
         #[derive(
             Clone,
             Debug,
@@ -84220,10 +84574,557 @@ mod root {
             }
         }
 
+        /// The table `ChainStatus` in the namespace `MoorRpc`
+        ///
+        /// Generated from these locations:
+        /// * Table `ChainStatus` in the file `moor_rpc.fbs:1027`
+        #[derive(
+            Clone,
+            Debug,
+            PartialEq,
+            PartialOrd,
+            Eq,
+            Ord,
+            Hash,
+            ::serde::Serialize,
+            ::serde::Deserialize,
+        )]
+        pub struct ChainStatus {
+            /// The field `sequencer` in the table `ChainStatus`
+            pub sequencer: bool,
+            /// The field `sealed_height` in the table `ChainStatus`
+            pub sealed_height: u64,
+            /// The field `published_height` in the table `ChainStatus`
+            pub published_height: u64,
+            /// The field `header_hash` in the table `ChainStatus`
+            pub header_hash: ::core::option::Option<::planus::alloc::vec::Vec<u8>>,
+            /// The field `state_root` in the table `ChainStatus`
+            pub state_root: ::core::option::Option<::planus::alloc::vec::Vec<u8>>,
+            /// The field `domain_salt` in the table `ChainStatus`
+            pub domain_salt: ::planus::alloc::vec::Vec<u8>,
+            /// The field `fork_commit` in the table `ChainStatus`
+            pub fork_commit: ::planus::alloc::string::String,
+        }
+
+        #[allow(clippy::derivable_impls)]
+        impl ::core::default::Default for ChainStatus {
+            fn default() -> Self {
+                Self {
+                    sequencer: false,
+                    sealed_height: 0,
+                    published_height: 0,
+                    header_hash: ::core::default::Default::default(),
+                    state_root: ::core::default::Default::default(),
+                    domain_salt: ::core::default::Default::default(),
+                    fork_commit: ::core::default::Default::default(),
+                }
+            }
+        }
+
+        impl ChainStatus {
+            /// Creates a [ChainStatusBuilder] for serializing an instance of this table.
+            #[inline]
+            pub fn builder() -> ChainStatusBuilder<()> {
+                ChainStatusBuilder(())
+            }
+
+            #[allow(clippy::too_many_arguments)]
+            pub fn create(
+                builder: &mut ::planus::Builder,
+                field_sequencer: impl ::planus::WriteAsDefault<bool, bool>,
+                field_sealed_height: impl ::planus::WriteAsDefault<u64, u64>,
+                field_published_height: impl ::planus::WriteAsDefault<u64, u64>,
+                field_header_hash: impl ::planus::WriteAsOptional<::planus::Offset<[u8]>>,
+                field_state_root: impl ::planus::WriteAsOptional<::planus::Offset<[u8]>>,
+                field_domain_salt: impl ::planus::WriteAs<::planus::Offset<[u8]>>,
+                field_fork_commit: impl ::planus::WriteAs<::planus::Offset<str>>,
+            ) -> ::planus::Offset<Self> {
+                let prepared_sequencer = field_sequencer.prepare(builder, &false);
+                let prepared_sealed_height = field_sealed_height.prepare(builder, &0);
+                let prepared_published_height = field_published_height.prepare(builder, &0);
+                let prepared_header_hash = field_header_hash.prepare(builder);
+                let prepared_state_root = field_state_root.prepare(builder);
+                let prepared_domain_salt = field_domain_salt.prepare(builder);
+                let prepared_fork_commit = field_fork_commit.prepare(builder);
+
+                let mut table_writer: ::planus::table_writer::TableWriter<18> =
+                    ::core::default::Default::default();
+                if prepared_sealed_height.is_some() {
+                    table_writer.write_entry::<u64>(1);
+                }
+                if prepared_published_height.is_some() {
+                    table_writer.write_entry::<u64>(2);
+                }
+                if prepared_header_hash.is_some() {
+                    table_writer.write_entry::<::planus::Offset<[u8]>>(3);
+                }
+                if prepared_state_root.is_some() {
+                    table_writer.write_entry::<::planus::Offset<[u8]>>(4);
+                }
+                table_writer.write_entry::<::planus::Offset<[u8]>>(5);
+                table_writer.write_entry::<::planus::Offset<str>>(6);
+                if prepared_sequencer.is_some() {
+                    table_writer.write_entry::<bool>(0);
+                }
+
+                unsafe {
+                    table_writer.finish(builder, |object_writer| {
+                        if let ::core::option::Option::Some(prepared_sealed_height) =
+                            prepared_sealed_height
+                        {
+                            object_writer.write::<_, _, 8>(&prepared_sealed_height);
+                        }
+                        if let ::core::option::Option::Some(prepared_published_height) =
+                            prepared_published_height
+                        {
+                            object_writer.write::<_, _, 8>(&prepared_published_height);
+                        }
+                        if let ::core::option::Option::Some(prepared_header_hash) =
+                            prepared_header_hash
+                        {
+                            object_writer.write::<_, _, 4>(&prepared_header_hash);
+                        }
+                        if let ::core::option::Option::Some(prepared_state_root) =
+                            prepared_state_root
+                        {
+                            object_writer.write::<_, _, 4>(&prepared_state_root);
+                        }
+                        object_writer.write::<_, _, 4>(&prepared_domain_salt);
+                        object_writer.write::<_, _, 4>(&prepared_fork_commit);
+                        if let ::core::option::Option::Some(prepared_sequencer) = prepared_sequencer
+                        {
+                            object_writer.write::<_, _, 1>(&prepared_sequencer);
+                        }
+                    });
+                }
+                builder.current_offset()
+            }
+        }
+
+        impl ::planus::WriteAs<::planus::Offset<ChainStatus>> for ChainStatus {
+            type Prepared = ::planus::Offset<Self>;
+
+            #[inline]
+            fn prepare(&self, builder: &mut ::planus::Builder) -> ::planus::Offset<ChainStatus> {
+                ::planus::WriteAsOffset::prepare(self, builder)
+            }
+        }
+
+        impl ::planus::WriteAsOptional<::planus::Offset<ChainStatus>> for ChainStatus {
+            type Prepared = ::planus::Offset<Self>;
+
+            #[inline]
+            fn prepare(
+                &self,
+                builder: &mut ::planus::Builder,
+            ) -> ::core::option::Option<::planus::Offset<ChainStatus>> {
+                ::core::option::Option::Some(::planus::WriteAsOffset::prepare(self, builder))
+            }
+        }
+
+        impl ::planus::WriteAsOffset<ChainStatus> for ChainStatus {
+            #[inline]
+            fn prepare(&self, builder: &mut ::planus::Builder) -> ::planus::Offset<ChainStatus> {
+                ChainStatus::create(
+                    builder,
+                    self.sequencer,
+                    self.sealed_height,
+                    self.published_height,
+                    &self.header_hash,
+                    &self.state_root,
+                    &self.domain_salt,
+                    &self.fork_commit,
+                )
+            }
+        }
+
+        /// Builder for serializing an instance of the [ChainStatus] type.
+        ///
+        /// Can be created using the [ChainStatus::builder] method.
+        #[derive(Debug)]
+        #[must_use]
+        pub struct ChainStatusBuilder<State>(State);
+
+        impl ChainStatusBuilder<()> {
+            /// Setter for the [`sequencer` field](ChainStatus#structfield.sequencer).
+            #[inline]
+            #[allow(clippy::type_complexity)]
+            pub fn sequencer<T0>(self, value: T0) -> ChainStatusBuilder<(T0,)>
+            where
+                T0: ::planus::WriteAsDefault<bool, bool>,
+            {
+                ChainStatusBuilder((value,))
+            }
+
+            /// Sets the [`sequencer` field](ChainStatus#structfield.sequencer) to the default value.
+            #[inline]
+            #[allow(clippy::type_complexity)]
+            pub fn sequencer_as_default(self) -> ChainStatusBuilder<(::planus::DefaultValue,)> {
+                self.sequencer(::planus::DefaultValue)
+            }
+        }
+
+        impl<T0> ChainStatusBuilder<(T0,)> {
+            /// Setter for the [`sealed_height` field](ChainStatus#structfield.sealed_height).
+            #[inline]
+            #[allow(clippy::type_complexity)]
+            pub fn sealed_height<T1>(self, value: T1) -> ChainStatusBuilder<(T0, T1)>
+            where
+                T1: ::planus::WriteAsDefault<u64, u64>,
+            {
+                let (v0,) = self.0;
+                ChainStatusBuilder((v0, value))
+            }
+
+            /// Sets the [`sealed_height` field](ChainStatus#structfield.sealed_height) to the default value.
+            #[inline]
+            #[allow(clippy::type_complexity)]
+            pub fn sealed_height_as_default(
+                self,
+            ) -> ChainStatusBuilder<(T0, ::planus::DefaultValue)> {
+                self.sealed_height(::planus::DefaultValue)
+            }
+        }
+
+        impl<T0, T1> ChainStatusBuilder<(T0, T1)> {
+            /// Setter for the [`published_height` field](ChainStatus#structfield.published_height).
+            #[inline]
+            #[allow(clippy::type_complexity)]
+            pub fn published_height<T2>(self, value: T2) -> ChainStatusBuilder<(T0, T1, T2)>
+            where
+                T2: ::planus::WriteAsDefault<u64, u64>,
+            {
+                let (v0, v1) = self.0;
+                ChainStatusBuilder((v0, v1, value))
+            }
+
+            /// Sets the [`published_height` field](ChainStatus#structfield.published_height) to the default value.
+            #[inline]
+            #[allow(clippy::type_complexity)]
+            pub fn published_height_as_default(
+                self,
+            ) -> ChainStatusBuilder<(T0, T1, ::planus::DefaultValue)> {
+                self.published_height(::planus::DefaultValue)
+            }
+        }
+
+        impl<T0, T1, T2> ChainStatusBuilder<(T0, T1, T2)> {
+            /// Setter for the [`header_hash` field](ChainStatus#structfield.header_hash).
+            #[inline]
+            #[allow(clippy::type_complexity)]
+            pub fn header_hash<T3>(self, value: T3) -> ChainStatusBuilder<(T0, T1, T2, T3)>
+            where
+                T3: ::planus::WriteAsOptional<::planus::Offset<[u8]>>,
+            {
+                let (v0, v1, v2) = self.0;
+                ChainStatusBuilder((v0, v1, v2, value))
+            }
+
+            /// Sets the [`header_hash` field](ChainStatus#structfield.header_hash) to null.
+            #[inline]
+            #[allow(clippy::type_complexity)]
+            pub fn header_hash_as_null(self) -> ChainStatusBuilder<(T0, T1, T2, ())> {
+                self.header_hash(())
+            }
+        }
+
+        impl<T0, T1, T2, T3> ChainStatusBuilder<(T0, T1, T2, T3)> {
+            /// Setter for the [`state_root` field](ChainStatus#structfield.state_root).
+            #[inline]
+            #[allow(clippy::type_complexity)]
+            pub fn state_root<T4>(self, value: T4) -> ChainStatusBuilder<(T0, T1, T2, T3, T4)>
+            where
+                T4: ::planus::WriteAsOptional<::planus::Offset<[u8]>>,
+            {
+                let (v0, v1, v2, v3) = self.0;
+                ChainStatusBuilder((v0, v1, v2, v3, value))
+            }
+
+            /// Sets the [`state_root` field](ChainStatus#structfield.state_root) to null.
+            #[inline]
+            #[allow(clippy::type_complexity)]
+            pub fn state_root_as_null(self) -> ChainStatusBuilder<(T0, T1, T2, T3, ())> {
+                self.state_root(())
+            }
+        }
+
+        impl<T0, T1, T2, T3, T4> ChainStatusBuilder<(T0, T1, T2, T3, T4)> {
+            /// Setter for the [`domain_salt` field](ChainStatus#structfield.domain_salt).
+            #[inline]
+            #[allow(clippy::type_complexity)]
+            pub fn domain_salt<T5>(self, value: T5) -> ChainStatusBuilder<(T0, T1, T2, T3, T4, T5)>
+            where
+                T5: ::planus::WriteAs<::planus::Offset<[u8]>>,
+            {
+                let (v0, v1, v2, v3, v4) = self.0;
+                ChainStatusBuilder((v0, v1, v2, v3, v4, value))
+            }
+        }
+
+        impl<T0, T1, T2, T3, T4, T5> ChainStatusBuilder<(T0, T1, T2, T3, T4, T5)> {
+            /// Setter for the [`fork_commit` field](ChainStatus#structfield.fork_commit).
+            #[inline]
+            #[allow(clippy::type_complexity)]
+            pub fn fork_commit<T6>(
+                self,
+                value: T6,
+            ) -> ChainStatusBuilder<(T0, T1, T2, T3, T4, T5, T6)>
+            where
+                T6: ::planus::WriteAs<::planus::Offset<str>>,
+            {
+                let (v0, v1, v2, v3, v4, v5) = self.0;
+                ChainStatusBuilder((v0, v1, v2, v3, v4, v5, value))
+            }
+        }
+
+        impl<T0, T1, T2, T3, T4, T5, T6> ChainStatusBuilder<(T0, T1, T2, T3, T4, T5, T6)> {
+            /// Finish writing the builder to get an [Offset](::planus::Offset) to a serialized [ChainStatus].
+            #[inline]
+            pub fn finish(self, builder: &mut ::planus::Builder) -> ::planus::Offset<ChainStatus>
+            where
+                Self: ::planus::WriteAsOffset<ChainStatus>,
+            {
+                ::planus::WriteAsOffset::prepare(&self, builder)
+            }
+        }
+
+        impl<
+            T0: ::planus::WriteAsDefault<bool, bool>,
+            T1: ::planus::WriteAsDefault<u64, u64>,
+            T2: ::planus::WriteAsDefault<u64, u64>,
+            T3: ::planus::WriteAsOptional<::planus::Offset<[u8]>>,
+            T4: ::planus::WriteAsOptional<::planus::Offset<[u8]>>,
+            T5: ::planus::WriteAs<::planus::Offset<[u8]>>,
+            T6: ::planus::WriteAs<::planus::Offset<str>>,
+        > ::planus::WriteAs<::planus::Offset<ChainStatus>>
+            for ChainStatusBuilder<(T0, T1, T2, T3, T4, T5, T6)>
+        {
+            type Prepared = ::planus::Offset<ChainStatus>;
+
+            #[inline]
+            fn prepare(&self, builder: &mut ::planus::Builder) -> ::planus::Offset<ChainStatus> {
+                ::planus::WriteAsOffset::prepare(self, builder)
+            }
+        }
+
+        impl<
+            T0: ::planus::WriteAsDefault<bool, bool>,
+            T1: ::planus::WriteAsDefault<u64, u64>,
+            T2: ::planus::WriteAsDefault<u64, u64>,
+            T3: ::planus::WriteAsOptional<::planus::Offset<[u8]>>,
+            T4: ::planus::WriteAsOptional<::planus::Offset<[u8]>>,
+            T5: ::planus::WriteAs<::planus::Offset<[u8]>>,
+            T6: ::planus::WriteAs<::planus::Offset<str>>,
+        > ::planus::WriteAsOptional<::planus::Offset<ChainStatus>>
+            for ChainStatusBuilder<(T0, T1, T2, T3, T4, T5, T6)>
+        {
+            type Prepared = ::planus::Offset<ChainStatus>;
+
+            #[inline]
+            fn prepare(
+                &self,
+                builder: &mut ::planus::Builder,
+            ) -> ::core::option::Option<::planus::Offset<ChainStatus>> {
+                ::core::option::Option::Some(::planus::WriteAsOffset::prepare(self, builder))
+            }
+        }
+
+        impl<
+            T0: ::planus::WriteAsDefault<bool, bool>,
+            T1: ::planus::WriteAsDefault<u64, u64>,
+            T2: ::planus::WriteAsDefault<u64, u64>,
+            T3: ::planus::WriteAsOptional<::planus::Offset<[u8]>>,
+            T4: ::planus::WriteAsOptional<::planus::Offset<[u8]>>,
+            T5: ::planus::WriteAs<::planus::Offset<[u8]>>,
+            T6: ::planus::WriteAs<::planus::Offset<str>>,
+        > ::planus::WriteAsOffset<ChainStatus>
+            for ChainStatusBuilder<(T0, T1, T2, T3, T4, T5, T6)>
+        {
+            #[inline]
+            fn prepare(&self, builder: &mut ::planus::Builder) -> ::planus::Offset<ChainStatus> {
+                let (v0, v1, v2, v3, v4, v5, v6) = &self.0;
+                ChainStatus::create(builder, v0, v1, v2, v3, v4, v5, v6)
+            }
+        }
+
+        /// Reference to a deserialized [ChainStatus].
+        #[derive(Copy, Clone)]
+        pub struct ChainStatusRef<'a>(#[allow(dead_code)] ::planus::table_reader::Table<'a>);
+
+        impl<'a> ChainStatusRef<'a> {
+            /// Getter for the [`sequencer` field](ChainStatus#structfield.sequencer).
+            #[inline]
+            pub fn sequencer(&self) -> ::planus::Result<bool> {
+                ::core::result::Result::Ok(
+                    self.0
+                        .access(0, "ChainStatus", "sequencer")?
+                        .unwrap_or(false),
+                )
+            }
+
+            /// Getter for the [`sealed_height` field](ChainStatus#structfield.sealed_height).
+            #[inline]
+            pub fn sealed_height(&self) -> ::planus::Result<u64> {
+                ::core::result::Result::Ok(
+                    self.0
+                        .access(1, "ChainStatus", "sealed_height")?
+                        .unwrap_or(0),
+                )
+            }
+
+            /// Getter for the [`published_height` field](ChainStatus#structfield.published_height).
+            #[inline]
+            pub fn published_height(&self) -> ::planus::Result<u64> {
+                ::core::result::Result::Ok(
+                    self.0
+                        .access(2, "ChainStatus", "published_height")?
+                        .unwrap_or(0),
+                )
+            }
+
+            /// Getter for the [`header_hash` field](ChainStatus#structfield.header_hash).
+            #[inline]
+            pub fn header_hash(&self) -> ::planus::Result<::core::option::Option<&'a [u8]>> {
+                self.0.access(3, "ChainStatus", "header_hash")
+            }
+
+            /// Getter for the [`state_root` field](ChainStatus#structfield.state_root).
+            #[inline]
+            pub fn state_root(&self) -> ::planus::Result<::core::option::Option<&'a [u8]>> {
+                self.0.access(4, "ChainStatus", "state_root")
+            }
+
+            /// Getter for the [`domain_salt` field](ChainStatus#structfield.domain_salt).
+            #[inline]
+            pub fn domain_salt(&self) -> ::planus::Result<&'a [u8]> {
+                self.0.access_required(5, "ChainStatus", "domain_salt")
+            }
+
+            /// Getter for the [`fork_commit` field](ChainStatus#structfield.fork_commit).
+            #[inline]
+            pub fn fork_commit(&self) -> ::planus::Result<&'a ::core::primitive::str> {
+                self.0.access_required(6, "ChainStatus", "fork_commit")
+            }
+        }
+
+        impl<'a> ::core::fmt::Debug for ChainStatusRef<'a> {
+            fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+                let mut f = f.debug_struct("ChainStatusRef");
+                f.field("sequencer", &self.sequencer());
+                f.field("sealed_height", &self.sealed_height());
+                f.field("published_height", &self.published_height());
+                if let ::core::option::Option::Some(field_header_hash) =
+                    self.header_hash().transpose()
+                {
+                    f.field("header_hash", &field_header_hash);
+                }
+                if let ::core::option::Option::Some(field_state_root) =
+                    self.state_root().transpose()
+                {
+                    f.field("state_root", &field_state_root);
+                }
+                f.field("domain_salt", &self.domain_salt());
+                f.field("fork_commit", &self.fork_commit());
+                f.finish()
+            }
+        }
+
+        impl<'a> ::core::convert::TryFrom<ChainStatusRef<'a>> for ChainStatus {
+            type Error = ::planus::Error;
+
+            #[allow(unreachable_code)]
+            fn try_from(value: ChainStatusRef<'a>) -> ::planus::Result<Self> {
+                ::core::result::Result::Ok(Self {
+                    sequencer: ::core::convert::TryInto::try_into(value.sequencer()?)?,
+                    sealed_height: ::core::convert::TryInto::try_into(value.sealed_height()?)?,
+                    published_height: ::core::convert::TryInto::try_into(
+                        value.published_height()?,
+                    )?,
+                    header_hash: value.header_hash()?.map(|v| v.to_vec()),
+                    state_root: value.state_root()?.map(|v| v.to_vec()),
+                    domain_salt: value.domain_salt()?.to_vec(),
+                    fork_commit: ::core::convert::Into::into(value.fork_commit()?),
+                })
+            }
+        }
+
+        impl<'a> ::planus::TableRead<'a> for ChainStatusRef<'a> {
+            #[inline]
+            fn from_buffer(
+                buffer: ::planus::SliceWithStartOffset<'a>,
+                offset: usize,
+            ) -> ::core::result::Result<Self, ::planus::errors::ErrorKind> {
+                ::core::result::Result::Ok(Self(::planus::table_reader::Table::from_buffer(
+                    buffer, offset,
+                )?))
+            }
+        }
+
+        impl<'a> ::planus::VectorReadInner<'a> for ChainStatusRef<'a> {
+            type Error = ::planus::Error;
+            const STRIDE: usize = 4;
+
+            unsafe fn from_buffer(
+                buffer: ::planus::SliceWithStartOffset<'a>,
+                offset: usize,
+            ) -> ::planus::Result<Self> {
+                ::planus::TableRead::from_buffer(buffer, offset).map_err(|error_kind| {
+                    error_kind.with_error_location(
+                        "[ChainStatusRef]",
+                        "get",
+                        buffer.offset_from_start,
+                    )
+                })
+            }
+        }
+
+        /// # Safety
+        /// The planus compiler generates implementations that initialize
+        /// the bytes in `write_values`.
+        unsafe impl ::planus::VectorWrite<::planus::Offset<ChainStatus>> for ChainStatus {
+            type Value = ::planus::Offset<ChainStatus>;
+            const STRIDE: usize = 4;
+            #[inline]
+            fn prepare(&self, builder: &mut ::planus::Builder) -> Self::Value {
+                ::planus::WriteAs::prepare(self, builder)
+            }
+
+            #[inline]
+            unsafe fn write_values(
+                values: &[::planus::Offset<ChainStatus>],
+                bytes: *mut ::core::mem::MaybeUninit<u8>,
+                buffer_position: u32,
+            ) {
+                let bytes = bytes as *mut [::core::mem::MaybeUninit<u8>; 4];
+                for (i, v) in ::core::iter::Iterator::enumerate(values.iter()) {
+                    ::planus::WriteAsPrimitive::write(
+                        v,
+                        ::planus::Cursor::new(unsafe { &mut *bytes.add(i) }),
+                        buffer_position - (Self::STRIDE * i) as u32,
+                    );
+                }
+            }
+        }
+
+        impl<'a> ::planus::ReadAsRoot<'a> for ChainStatusRef<'a> {
+            fn read_as_root(slice: &'a [u8]) -> ::planus::Result<Self> {
+                ::planus::TableRead::from_buffer(
+                    ::planus::SliceWithStartOffset {
+                        buffer: slice,
+                        offset_from_start: 0,
+                    },
+                    0,
+                )
+                .map_err(|error_kind| {
+                    error_kind.with_error_location("[ChainStatusRef]", "read_as_root", 0)
+                })
+            }
+        }
+
         /// The table `InputThanks` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `InputThanks` in the file `moor_rpc.fbs:1018`
+        /// * Table `InputThanks` in the file `moor_rpc.fbs:1037`
         #[derive(
             Clone,
             Debug,
@@ -84434,7 +85335,7 @@ mod root {
         /// The table `EvalResult` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `EvalResult` in the file `moor_rpc.fbs:1021`
+        /// * Table `EvalResult` in the file `moor_rpc.fbs:1040`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub struct EvalResult {
             /// The field `result` in the table `EvalResult`
@@ -84670,7 +85571,7 @@ mod root {
         /// The table `ThanksPong` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `ThanksPong` in the file `moor_rpc.fbs:1025`
+        /// * Table `ThanksPong` in the file `moor_rpc.fbs:1044`
         #[derive(
             Clone,
             Debug,
@@ -84935,7 +85836,7 @@ mod root {
         /// The table `ClientEvents` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `ClientEvents` in the file `moor_rpc.fbs:1029`
+        /// * Table `ClientEvents` in the file `moor_rpc.fbs:1048`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub struct ClientEvents {
             /// The field `events` in the table `ClientEvents`
@@ -85238,7 +86139,7 @@ mod root {
         /// The table `VerbsReply` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `VerbsReply` in the file `moor_rpc.fbs:1034`
+        /// * Table `VerbsReply` in the file `moor_rpc.fbs:1053`
         #[derive(
             Clone,
             Debug,
@@ -85502,7 +86403,7 @@ mod root {
         /// The table `PropertiesReply` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `PropertiesReply` in the file `moor_rpc.fbs:1038`
+        /// * Table `PropertiesReply` in the file `moor_rpc.fbs:1057`
         #[derive(
             Clone,
             Debug,
@@ -85782,7 +86683,7 @@ mod root {
         /// The table `VerbProgramResponseReply` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `VerbProgramResponseReply` in the file `moor_rpc.fbs:1042`
+        /// * Table `VerbProgramResponseReply` in the file `moor_rpc.fbs:1061`
         #[derive(
             Clone,
             Debug,
@@ -86057,7 +86958,7 @@ mod root {
         /// The table `PropertyValue` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `PropertyValue` in the file `moor_rpc.fbs:1046`
+        /// * Table `PropertyValue` in the file `moor_rpc.fbs:1065`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub struct PropertyValue {
             /// The field `prop_info` in the table `PropertyValue`
@@ -86329,7 +87230,7 @@ mod root {
         /// The table `VerbValue` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `VerbValue` in the file `moor_rpc.fbs:1051`
+        /// * Table `VerbValue` in the file `moor_rpc.fbs:1070`
         #[derive(
             Clone,
             Debug,
@@ -86611,7 +87512,7 @@ mod root {
         /// The table `ResolveResult` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `ResolveResult` in the file `moor_rpc.fbs:1056`
+        /// * Table `ResolveResult` in the file `moor_rpc.fbs:1075`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub struct ResolveResult {
             /// The field `result` in the table `ResolveResult`
@@ -86848,7 +87749,7 @@ mod root {
         /// The table `HistoryResponseReply` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `HistoryResponseReply` in the file `moor_rpc.fbs:1060`
+        /// * Table `HistoryResponseReply` in the file `moor_rpc.fbs:1079`
         #[derive(
             Clone,
             Debug,
@@ -87123,7 +88024,7 @@ mod root {
         /// The table `PresentationSnapshot` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `PresentationSnapshot` in the file `moor_rpc.fbs:1064`
+        /// * Table `PresentationSnapshot` in the file `moor_rpc.fbs:1083`
         #[derive(
             Clone,
             Debug,
@@ -87430,7 +88331,7 @@ mod root {
         /// The table `CurrentPresentations` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `CurrentPresentations` in the file `moor_rpc.fbs:1069`
+        /// * Table `CurrentPresentations` in the file `moor_rpc.fbs:1088`
         #[derive(
             Clone,
             Debug,
@@ -87714,7 +88615,7 @@ mod root {
         /// The table `PresentationDismissed` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `PresentationDismissed` in the file `moor_rpc.fbs:1073`
+        /// * Table `PresentationDismissed` in the file `moor_rpc.fbs:1092`
         #[derive(
             Clone,
             Debug,
@@ -87948,7 +88849,7 @@ mod root {
         /// The table `ClientAttributeSet` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `ClientAttributeSet` in the file `moor_rpc.fbs:1076`
+        /// * Table `ClientAttributeSet` in the file `moor_rpc.fbs:1095`
         #[derive(
             Clone,
             Debug,
@@ -88176,7 +89077,7 @@ mod root {
         /// The table `Disconnected` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `Disconnected` in the file `moor_rpc.fbs:1079`
+        /// * Table `Disconnected` in the file `moor_rpc.fbs:1098`
         #[derive(
             Clone,
             Debug,
@@ -88387,7 +89288,7 @@ mod root {
         /// The table `EventLogPublicKey` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `EventLogPublicKey` in the file `moor_rpc.fbs:1082`
+        /// * Table `EventLogPublicKey` in the file `moor_rpc.fbs:1101`
         #[derive(
             Clone,
             Debug,
@@ -88678,7 +89579,7 @@ mod root {
         /// The table `EventLogHistoryDeleted` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `EventLogHistoryDeleted` in the file `moor_rpc.fbs:1086`
+        /// * Table `EventLogHistoryDeleted` in the file `moor_rpc.fbs:1105`
         #[derive(
             Clone,
             Debug,
@@ -88970,7 +89871,7 @@ mod root {
         /// The table `ObjectInfo` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `ObjectInfo` in the file `moor_rpc.fbs:1090`
+        /// * Table `ObjectInfo` in the file `moor_rpc.fbs:1109`
         #[derive(
             Clone,
             Debug,
@@ -89627,7 +90528,7 @@ mod root {
         /// The table `ListObjectsReply` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `ListObjectsReply` in the file `moor_rpc.fbs:1102`
+        /// * Table `ListObjectsReply` in the file `moor_rpc.fbs:1121`
         #[derive(
             Clone,
             Debug,
@@ -89903,7 +90804,7 @@ mod root {
         /// The table `PropertyUpdated` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `PropertyUpdated` in the file `moor_rpc.fbs:1106`
+        /// * Table `PropertyUpdated` in the file `moor_rpc.fbs:1125`
         #[derive(
             Clone,
             Debug,
@@ -90129,7 +91030,7 @@ mod root {
         /// The union `SystemHandlerResponseUnion` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Union `SystemHandlerResponseUnion` in the file `moor_rpc.fbs:1109`
+        /// * Union `SystemHandlerResponseUnion` in the file `moor_rpc.fbs:1128`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub enum SystemHandlerResponseUnion {
             /// The variant of type `SystemHandlerSuccess` in the union `SystemHandlerResponseUnion`
@@ -90349,7 +91250,7 @@ mod root {
         /// The table `SystemHandlerSuccess` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `SystemHandlerSuccess` in the file `moor_rpc.fbs:1114`
+        /// * Table `SystemHandlerSuccess` in the file `moor_rpc.fbs:1133`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub struct SystemHandlerSuccess {
             /// The field `result` in the table `SystemHandlerSuccess`
@@ -90604,7 +91505,7 @@ mod root {
         /// The table `SystemHandlerError` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `SystemHandlerError` in the file `moor_rpc.fbs:1118`
+        /// * Table `SystemHandlerError` in the file `moor_rpc.fbs:1137`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub struct SystemHandlerError {
             /// The field `error` in the table `SystemHandlerError`
@@ -90857,7 +91758,7 @@ mod root {
         /// The table `SystemHandlerResponseReply` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `SystemHandlerResponseReply` in the file `moor_rpc.fbs:1122`
+        /// * Table `SystemHandlerResponseReply` in the file `moor_rpc.fbs:1141`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub struct SystemHandlerResponseReply {
             /// The field `response` in the table `SystemHandlerResponseReply`
@@ -91126,7 +92027,7 @@ mod root {
         /// The union `InvocationOutcome` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Union `InvocationOutcome` in the file `moor_rpc.fbs:1126`
+        /// * Union `InvocationOutcome` in the file `moor_rpc.fbs:1145`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub enum InvocationOutcome {
             /// The variant of type `InvocationSuccess` in the union `InvocationOutcome`
@@ -91340,7 +92241,7 @@ mod root {
         /// The table `InvocationSuccess` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `InvocationSuccess` in the file `moor_rpc.fbs:1131`
+        /// * Table `InvocationSuccess` in the file `moor_rpc.fbs:1150`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub struct InvocationSuccess {
             /// The field `result` in the table `InvocationSuccess`
@@ -91593,7 +92494,7 @@ mod root {
         /// The table `InvocationError` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `InvocationError` in the file `moor_rpc.fbs:1135`
+        /// * Table `InvocationError` in the file `moor_rpc.fbs:1154`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub struct InvocationError {
             /// The field `error` in the table `InvocationError`
@@ -91845,7 +92746,7 @@ mod root {
         /// The table `InvocationResponse` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `InvocationResponse` in the file `moor_rpc.fbs:1139`
+        /// * Table `InvocationResponse` in the file `moor_rpc.fbs:1158`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub struct InvocationResponse {
             /// The field `outcome` in the table `InvocationResponse`
@@ -92148,7 +93049,7 @@ mod root {
         /// The table `DaemonToClientReply` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `DaemonToClientReply` in the file `moor_rpc.fbs:1144`
+        /// * Table `DaemonToClientReply` in the file `moor_rpc.fbs:1163`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub struct DaemonToClientReply {
             /// The field `reply` in the table `DaemonToClientReply`
@@ -92404,7 +93305,7 @@ mod root {
         /// The union `ClientEventUnion` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Union `ClientEventUnion` in the file `moor_rpc.fbs:1152`
+        /// * Union `ClientEventUnion` in the file `moor_rpc.fbs:1171`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub enum ClientEventUnion {
             /// The variant of type `NarrativeEventMessage` in the union `ClientEventUnion`
@@ -93183,7 +94084,7 @@ mod root {
         /// The table `NarrativeEventMessage` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `NarrativeEventMessage` in the file `moor_rpc.fbs:1166`
+        /// * Table `NarrativeEventMessage` in the file `moor_rpc.fbs:1185`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub struct NarrativeEventMessage {
             /// The field `player` in the table `NarrativeEventMessage`
@@ -93585,7 +94486,7 @@ mod root {
         /// The table `MetadataPair` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `MetadataPair` in the file `moor_rpc.fbs:1175`
+        /// * Table `MetadataPair` in the file `moor_rpc.fbs:1194`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub struct MetadataPair {
             /// The field `key` in the table `MetadataPair`
@@ -93857,7 +94758,7 @@ mod root {
         /// The table `RequestInputEvent` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `RequestInputEvent` in the file `moor_rpc.fbs:1180`
+        /// * Table `RequestInputEvent` in the file `moor_rpc.fbs:1199`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub struct RequestInputEvent {
             /// The field `request_id` in the table `RequestInputEvent`
@@ -94181,7 +95082,7 @@ mod root {
         /// The table `SystemMessageEvent` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `SystemMessageEvent` in the file `moor_rpc.fbs:1185`
+        /// * Table `SystemMessageEvent` in the file `moor_rpc.fbs:1204`
         #[derive(
             Clone,
             Debug,
@@ -94477,7 +95378,7 @@ mod root {
         /// The table `DisconnectEvent` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `DisconnectEvent` in the file `moor_rpc.fbs:1190`
+        /// * Table `DisconnectEvent` in the file `moor_rpc.fbs:1209`
         #[derive(
             Clone,
             Debug,
@@ -94703,7 +95604,7 @@ mod root {
         /// The table `TaskErrorEvent` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `TaskErrorEvent` in the file `moor_rpc.fbs:1193`
+        /// * Table `TaskErrorEvent` in the file `moor_rpc.fbs:1212`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub struct TaskErrorEvent {
             /// The field `task_id` in the table `TaskErrorEvent`
@@ -94986,7 +95887,7 @@ mod root {
         /// The table `TaskSuccessEvent` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `TaskSuccessEvent` in the file `moor_rpc.fbs:1198`
+        /// * Table `TaskSuccessEvent` in the file `moor_rpc.fbs:1217`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub struct TaskSuccessEvent {
             /// The field `task_id` in the table `TaskSuccessEvent`
@@ -95287,7 +96188,7 @@ mod root {
         /// The table `TaskSuspendedEvent` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `TaskSuspendedEvent` in the file `moor_rpc.fbs:1203`
+        /// * Table `TaskSuspendedEvent` in the file `moor_rpc.fbs:1222`
         #[derive(
             Clone,
             Debug,
@@ -95572,7 +96473,7 @@ mod root {
         /// The table `PlayerSwitchedEvent` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `PlayerSwitchedEvent` in the file `moor_rpc.fbs:1207`
+        /// * Table `PlayerSwitchedEvent` in the file `moor_rpc.fbs:1226`
         #[derive(
             Clone,
             Debug,
@@ -95982,7 +96883,7 @@ mod root {
         /// The table `SetConnectionOptionEvent` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `SetConnectionOptionEvent` in the file `moor_rpc.fbs:1214`
+        /// * Table `SetConnectionOptionEvent` in the file `moor_rpc.fbs:1233`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub struct SetConnectionOptionEvent {
             /// The field `connection_obj` in the table `SetConnectionOptionEvent`
@@ -96321,7 +97222,7 @@ mod root {
         /// The table `CredentialsUpdatedEvent` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `CredentialsUpdatedEvent` in the file `moor_rpc.fbs:1222`
+        /// * Table `CredentialsUpdatedEvent` in the file `moor_rpc.fbs:1241`
         #[derive(
             Clone,
             Debug,
@@ -96642,7 +97543,7 @@ mod root {
         /// The table `ClientEvent` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `ClientEvent` in the file `moor_rpc.fbs:1227`
+        /// * Table `ClientEvent` in the file `moor_rpc.fbs:1246`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub struct ClientEvent {
             /// The field `event` in the table `ClientEvent`
@@ -96925,7 +97826,7 @@ mod root {
         /// The union `ClientsBroadcastEventUnion` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Union `ClientsBroadcastEventUnion` in the file `moor_rpc.fbs:1236`
+        /// * Union `ClientsBroadcastEventUnion` in the file `moor_rpc.fbs:1255`
         #[derive(
             Clone,
             Debug,
@@ -97157,7 +98058,7 @@ mod root {
         /// The table `ClientsBroadcastPingPong` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `ClientsBroadcastPingPong` in the file `moor_rpc.fbs:1241`
+        /// * Table `ClientsBroadcastPingPong` in the file `moor_rpc.fbs:1260`
         #[derive(
             Clone,
             Debug,
@@ -97454,7 +98355,7 @@ mod root {
         /// The table `ClientsBroadcastSealNotice` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `ClientsBroadcastSealNotice` in the file `moor_rpc.fbs:1246`
+        /// * Table `ClientsBroadcastSealNotice` in the file `moor_rpc.fbs:1265`
         #[derive(
             Clone,
             Debug,
@@ -97831,7 +98732,7 @@ mod root {
         /// The table `ClientsBroadcastEvent` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `ClientsBroadcastEvent` in the file `moor_rpc.fbs:1252`
+        /// * Table `ClientsBroadcastEvent` in the file `moor_rpc.fbs:1271`
         #[derive(
             Clone,
             Debug,
@@ -98099,7 +99000,7 @@ mod root {
         /// The union `DaemonToWorkerMessageUnion` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Union `DaemonToWorkerMessageUnion` in the file `moor_rpc.fbs:1260`
+        /// * Union `DaemonToWorkerMessageUnion` in the file `moor_rpc.fbs:1279`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub enum DaemonToWorkerMessageUnion {
             /// The variant of type `PingWorkers` in the union `DaemonToWorkerMessageUnion`
@@ -98377,7 +99278,7 @@ mod root {
         /// The table `PingWorkers` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `PingWorkers` in the file `moor_rpc.fbs:1266`
+        /// * Table `PingWorkers` in the file `moor_rpc.fbs:1285`
         #[derive(
             Clone,
             Debug,
@@ -98588,7 +99489,7 @@ mod root {
         /// The table `WorkerRequest` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `WorkerRequest` in the file `moor_rpc.fbs:1269`
+        /// * Table `WorkerRequest` in the file `moor_rpc.fbs:1288`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub struct WorkerRequest {
             /// The field `worker_id` in the table `WorkerRequest`
@@ -98985,7 +99886,7 @@ mod root {
         /// The table `PleaseDie` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `PleaseDie` in the file `moor_rpc.fbs:1277`
+        /// * Table `PleaseDie` in the file `moor_rpc.fbs:1296`
         #[derive(
             Clone,
             Debug,
@@ -99240,7 +100141,7 @@ mod root {
         /// The table `DaemonToWorkerMessage` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `DaemonToWorkerMessage` in the file `moor_rpc.fbs:1281`
+        /// * Table `DaemonToWorkerMessage` in the file `moor_rpc.fbs:1300`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub struct DaemonToWorkerMessage {
             /// The field `message` in the table `DaemonToWorkerMessage`
@@ -99498,7 +100399,7 @@ mod root {
         /// The union `WorkerToDaemonMessageUnion` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Union `WorkerToDaemonMessageUnion` in the file `moor_rpc.fbs:1285`
+        /// * Union `WorkerToDaemonMessageUnion` in the file `moor_rpc.fbs:1304`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub enum WorkerToDaemonMessageUnion {
             /// The variant of type `AttachWorker` in the union `WorkerToDaemonMessageUnion`
@@ -99900,7 +100801,7 @@ mod root {
         /// The table `AttachWorker` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `AttachWorker` in the file `moor_rpc.fbs:1293`
+        /// * Table `AttachWorker` in the file `moor_rpc.fbs:1312`
         #[derive(
             Clone,
             Debug,
@@ -100192,7 +101093,7 @@ mod root {
         /// The table `WorkerPong` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `WorkerPong` in the file `moor_rpc.fbs:1298`
+        /// * Table `WorkerPong` in the file `moor_rpc.fbs:1317`
         #[derive(
             Clone,
             Debug,
@@ -100483,7 +101384,7 @@ mod root {
         /// The table `DetachWorker` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `DetachWorker` in the file `moor_rpc.fbs:1303`
+        /// * Table `DetachWorker` in the file `moor_rpc.fbs:1322`
         #[derive(
             Clone,
             Debug,
@@ -100739,7 +101640,7 @@ mod root {
         /// The table `RequestResult` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `RequestResult` in the file `moor_rpc.fbs:1307`
+        /// * Table `RequestResult` in the file `moor_rpc.fbs:1326`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub struct RequestResult {
             /// The field `worker_id` in the table `RequestResult`
@@ -101044,7 +101945,7 @@ mod root {
         /// The table `RequestError` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `RequestError` in the file `moor_rpc.fbs:1313`
+        /// * Table `RequestError` in the file `moor_rpc.fbs:1332`
         #[derive(
             Clone,
             Debug,
@@ -101358,7 +102259,7 @@ mod root {
         /// The table `WorkerToDaemonMessage` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `WorkerToDaemonMessage` in the file `moor_rpc.fbs:1319`
+        /// * Table `WorkerToDaemonMessage` in the file `moor_rpc.fbs:1338`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub struct WorkerToDaemonMessage {
             /// The field `message` in the table `WorkerToDaemonMessage`
@@ -101616,7 +102517,7 @@ mod root {
         /// The union `DaemonToWorkerReplyUnion` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Union `DaemonToWorkerReplyUnion` in the file `moor_rpc.fbs:1323`
+        /// * Union `DaemonToWorkerReplyUnion` in the file `moor_rpc.fbs:1342`
         #[derive(
             Clone,
             Debug,
@@ -102158,7 +103059,7 @@ mod root {
         /// The table `WorkerAck` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `WorkerAck` in the file `moor_rpc.fbs:1333`
+        /// * Table `WorkerAck` in the file `moor_rpc.fbs:1352`
         #[derive(
             Clone,
             Debug,
@@ -102369,7 +103270,7 @@ mod root {
         /// The table `WorkerRejected` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `WorkerRejected` in the file `moor_rpc.fbs:1336`
+        /// * Table `WorkerRejected` in the file `moor_rpc.fbs:1355`
         #[derive(
             Clone,
             Debug,
@@ -102638,7 +103539,7 @@ mod root {
         /// The table `WorkerAttached` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `WorkerAttached` in the file `moor_rpc.fbs:1340`
+        /// * Table `WorkerAttached` in the file `moor_rpc.fbs:1359`
         #[derive(
             Clone,
             Debug,
@@ -102894,7 +103795,7 @@ mod root {
         /// The table `WorkerAuthFailed` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `WorkerAuthFailed` in the file `moor_rpc.fbs:1344`
+        /// * Table `WorkerAuthFailed` in the file `moor_rpc.fbs:1363`
         #[derive(
             Clone,
             Debug,
@@ -103164,7 +104065,7 @@ mod root {
         /// The table `WorkerInvalidPayload` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `WorkerInvalidPayload` in the file `moor_rpc.fbs:1348`
+        /// * Table `WorkerInvalidPayload` in the file `moor_rpc.fbs:1367`
         #[derive(
             Clone,
             Debug,
@@ -103436,7 +104337,7 @@ mod root {
         /// The table `WorkerUnknownRequest` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `WorkerUnknownRequest` in the file `moor_rpc.fbs:1352`
+        /// * Table `WorkerUnknownRequest` in the file `moor_rpc.fbs:1371`
         #[derive(
             Clone,
             Debug,
@@ -103711,7 +104612,7 @@ mod root {
         /// The table `WorkerNotRegistered` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `WorkerNotRegistered` in the file `moor_rpc.fbs:1356`
+        /// * Table `WorkerNotRegistered` in the file `moor_rpc.fbs:1375`
         #[derive(
             Clone,
             Debug,
@@ -103986,7 +104887,7 @@ mod root {
         /// The table `DaemonToWorkerReply` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `DaemonToWorkerReply` in the file `moor_rpc.fbs:1360`
+        /// * Table `DaemonToWorkerReply` in the file `moor_rpc.fbs:1379`
         #[derive(
             Clone,
             Debug,
@@ -104252,7 +105153,7 @@ mod root {
         /// The enum `RpcMessageErrorCode` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Enum `RpcMessageErrorCode` in the file `moor_rpc.fbs:1368`
+        /// * Enum `RpcMessageErrorCode` in the file `moor_rpc.fbs:1387`
         #[derive(
             Copy,
             Clone,
@@ -104471,7 +105372,7 @@ mod root {
         /// The table `RpcMessageError` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `RpcMessageError` in the file `moor_rpc.fbs:1382`
+        /// * Table `RpcMessageError` in the file `moor_rpc.fbs:1401`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub struct RpcMessageError {
             /// The field `error_code` in the table `RpcMessageError`
@@ -104869,7 +105770,7 @@ mod root {
         /// The union `MessageTypeUnion` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Union `MessageTypeUnion` in the file `moor_rpc.fbs:1388`
+        /// * Union `MessageTypeUnion` in the file `moor_rpc.fbs:1407`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub enum MessageTypeUnion {
             /// The variant of type `HostToDaemonMsg` in the union `MessageTypeUnion`
@@ -105083,7 +105984,7 @@ mod root {
         /// The table `HostToDaemonMsg` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `HostToDaemonMsg` in the file `moor_rpc.fbs:1393`
+        /// * Table `HostToDaemonMsg` in the file `moor_rpc.fbs:1412`
         #[derive(
             Clone,
             Debug,
@@ -105381,7 +106282,7 @@ mod root {
         /// The table `HostClientToDaemonMsg` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `HostClientToDaemonMsg` in the file `moor_rpc.fbs:1398`
+        /// * Table `HostClientToDaemonMsg` in the file `moor_rpc.fbs:1417`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub struct HostClientToDaemonMsg {
             /// The field `client_data` in the table `HostClientToDaemonMsg`
@@ -105674,7 +106575,7 @@ mod root {
         /// The table `MessageType` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `MessageType` in the file `moor_rpc.fbs:1403`
+        /// * Table `MessageType` in the file `moor_rpc.fbs:1422`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub struct MessageType {
             /// The field `message` in the table `MessageType`
@@ -105910,7 +106811,7 @@ mod root {
         /// The union `ReplyResultUnion` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Union `ReplyResultUnion` in the file `moor_rpc.fbs:1407`
+        /// * Union `ReplyResultUnion` in the file `moor_rpc.fbs:1426`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub enum ReplyResultUnion {
             /// The variant of type `HostSuccess` in the union `ReplyResultUnion`
@@ -106183,7 +107084,7 @@ mod root {
         /// The table `HostSuccess` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `HostSuccess` in the file `moor_rpc.fbs:1413`
+        /// * Table `HostSuccess` in the file `moor_rpc.fbs:1432`
         #[derive(
             Clone,
             Debug,
@@ -106429,7 +107330,7 @@ mod root {
         /// The table `ClientSuccess` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `ClientSuccess` in the file `moor_rpc.fbs:1417`
+        /// * Table `ClientSuccess` in the file `moor_rpc.fbs:1436`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub struct ClientSuccess {
             /// The field `reply` in the table `ClientSuccess`
@@ -106666,7 +107567,7 @@ mod root {
         /// The table `Failure` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `Failure` in the file `moor_rpc.fbs:1421`
+        /// * Table `Failure` in the file `moor_rpc.fbs:1440`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub struct Failure {
             /// The field `error` in the table `Failure`
@@ -106907,7 +107808,7 @@ mod root {
         /// The table `ReplyResult` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `ReplyResult` in the file `moor_rpc.fbs:1425`
+        /// * Table `ReplyResult` in the file `moor_rpc.fbs:1444`
         #[derive(Clone, Debug, PartialEq, PartialOrd, ::serde::Serialize, ::serde::Deserialize)]
         pub struct ReplyResult {
             /// The field `result` in the table `ReplyResult`
@@ -107143,7 +108044,7 @@ mod root {
         /// The union `HistoryRecallUnion` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Union `HistoryRecallUnion` in the file `moor_rpc.fbs:1433`
+        /// * Union `HistoryRecallUnion` in the file `moor_rpc.fbs:1452`
         #[derive(
             Clone,
             Debug,
@@ -107495,7 +108396,7 @@ mod root {
         /// The table `HistoryRecallSinceEvent` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `HistoryRecallSinceEvent` in the file `moor_rpc.fbs:1440`
+        /// * Table `HistoryRecallSinceEvent` in the file `moor_rpc.fbs:1459`
         #[derive(
             Clone,
             Debug,
@@ -107830,7 +108731,7 @@ mod root {
         /// The table `HistoryRecallUntilEvent` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `HistoryRecallUntilEvent` in the file `moor_rpc.fbs:1445`
+        /// * Table `HistoryRecallUntilEvent` in the file `moor_rpc.fbs:1464`
         #[derive(
             Clone,
             Debug,
@@ -108165,7 +109066,7 @@ mod root {
         /// The table `HistoryRecallSinceSeconds` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `HistoryRecallSinceSeconds` in the file `moor_rpc.fbs:1450`
+        /// * Table `HistoryRecallSinceSeconds` in the file `moor_rpc.fbs:1469`
         #[derive(
             Clone,
             Debug,
@@ -108510,7 +109411,7 @@ mod root {
         /// The table `HistoryRecallNone` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `HistoryRecallNone` in the file `moor_rpc.fbs:1455`
+        /// * Table `HistoryRecallNone` in the file `moor_rpc.fbs:1474`
         #[derive(
             Clone,
             Debug,
@@ -108738,7 +109639,7 @@ mod root {
         /// The table `HistoryRecall` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `HistoryRecall` in the file `moor_rpc.fbs:1458`
+        /// * Table `HistoryRecall` in the file `moor_rpc.fbs:1477`
         #[derive(
             Clone,
             Debug,
@@ -108985,7 +109886,7 @@ mod root {
         /// The table `HistoricalNarrativeEvent` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `HistoricalNarrativeEvent` in the file `moor_rpc.fbs:1462`
+        /// * Table `HistoricalNarrativeEvent` in the file `moor_rpc.fbs:1481`
         #[derive(
             Clone,
             Debug,
@@ -109437,7 +110338,7 @@ mod root {
         /// The table `HistoryResponse` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `HistoryResponse` in the file `moor_rpc.fbs:1470`
+        /// * Table `HistoryResponse` in the file `moor_rpc.fbs:1489`
         #[derive(
             Clone,
             Debug,
@@ -110067,7 +110968,7 @@ mod root {
         /// The enum `EventStreamOperation` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Enum `EventStreamOperation` in the file `moor_rpc.fbs:1488`
+        /// * Enum `EventStreamOperation` in the file `moor_rpc.fbs:1507`
         #[derive(
             Copy,
             Clone,
@@ -110245,7 +111146,7 @@ mod root {
         /// The table `EventStreamRequest` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `EventStreamRequest` in the file `moor_rpc.fbs:1490`
+        /// * Table `EventStreamRequest` in the file `moor_rpc.fbs:1509`
         #[derive(
             Clone,
             Debug,
@@ -110736,7 +111637,7 @@ mod root {
         /// The table `EventStreamPayload` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `EventStreamPayload` in the file `moor_rpc.fbs:1498`
+        /// * Table `EventStreamPayload` in the file `moor_rpc.fbs:1517`
         #[derive(
             Clone,
             Debug,
@@ -111006,7 +111907,7 @@ mod root {
         /// The table `EventStreamState` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `EventStreamState` in the file `moor_rpc.fbs:1500`
+        /// * Table `EventStreamState` in the file `moor_rpc.fbs:1519`
         #[derive(
             Clone,
             Debug,
@@ -111484,7 +112385,7 @@ mod root {
         /// The table `EventsAvailableEvent` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `EventsAvailableEvent` in the file `moor_rpc.fbs:1508`
+        /// * Table `EventsAvailableEvent` in the file `moor_rpc.fbs:1527`
         #[derive(
             Clone,
             Debug,
@@ -111714,7 +112615,7 @@ mod root {
         /// The table `GetServerStatus` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `GetServerStatus` in the file `moor_rpc.fbs:1511`
+        /// * Table `GetServerStatus` in the file `moor_rpc.fbs:1530`
         #[derive(
             Clone,
             Debug,
@@ -111940,7 +112841,7 @@ mod root {
         /// The table `ServerStatus` in the namespace `MoorRpc`
         ///
         /// Generated from these locations:
-        /// * Table `ServerStatus` in the file `moor_rpc.fbs:1513`
+        /// * Table `ServerStatus` in the file `moor_rpc.fbs:1532`
         #[derive(
             Clone,
             Debug,

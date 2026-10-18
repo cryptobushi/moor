@@ -75,10 +75,10 @@ pub use client_messages::{
     mk_eval_capture_msg, mk_eval_msg, mk_get_event_log_pubkey_msg, mk_invoke_system_handler_msg,
     mk_invoke_verb_capture_msg, mk_invoke_verb_msg, mk_invoke_welcome_message_msg,
     mk_list_objects_msg, mk_login_command_msg, mk_out_of_band_msg, mk_program_msg,
-    mk_properties_msg, mk_reattach_msg, mk_request_current_presentations_msg,
-    mk_request_history_msg, mk_request_sys_prop_msg, mk_requested_input_msg, mk_resolve_msg,
-    mk_retrieve_msg, mk_set_client_attribute_msg, mk_set_event_log_pubkey_msg,
-    mk_update_property_msg, mk_verbs_msg, mk_verified_oauth_login_msg,
+    mk_properties_msg, mk_reattach_msg, mk_request_chain_status_msg,
+    mk_request_current_presentations_msg, mk_request_history_msg, mk_request_sys_prop_msg,
+    mk_requested_input_msg, mk_resolve_msg, mk_retrieve_msg, mk_set_client_attribute_msg,
+    mk_set_event_log_pubkey_msg, mk_update_property_msg, mk_verbs_msg, mk_verified_oauth_login_msg,
 };
 pub use host_messages::{
     mk_detach_host_msg, mk_get_server_features_msg, mk_get_server_status_msg, mk_host_pong_msg,
