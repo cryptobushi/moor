@@ -25,7 +25,13 @@
 //!   If publication falls more than [`MAX_DA_LAG`] blocks behind, the block thread stops opening
 //!   blocks until it catches up (ADR 0006 decision 4, safety over liveness).
 //!
-//! Journal and signing-guard hook points are the kernel's `SequencerHooks` (S1-2).
+//! - **Durability (S1-2, decision 4).** The kernel's `DurableHooks` journal each group of inputs
+//!   (one fsync for the inputs already queued together) before any of them runs, and store the
+//!   unsigned block and the signing-guard record (both fsynced) before the signature. On start
+//!   the daemon has already recovered: sealed blocks the sink lacks are handed to the DA thread,
+//!   and the tip's seal notice is sent again.
+//! - **Log stalled.** While the DA lag halt holds, [`SequencerHandle::log_stalled`] is true and
+//!   every connected client gets a system message when the log stalls and when it resumes.
 
 pub mod dev_signer;
 pub mod metrics;
@@ -46,6 +52,7 @@ use moor_common::tasks::Session;
 use moor_kernel::tasks::{
     envelope_admission::OnAdmitted,
     sequencer::{InputReceipt, SealNotice, Sequencer},
+    sequencer_recovery::FsyncLog,
 };
 use tracing::{debug, error, info, warn};
 
@@ -56,6 +63,18 @@ pub const MAX_DA_LAG: u64 = 300;
 
 /// Blocks per metrics summary line.
 const METRICS_WINDOW_BLOCKS: u64 = 60;
+
+/// Inputs journalled together at most (one fsync for inputs already queued together).
+const MAX_GROUP_COMMIT: usize = 256;
+
+/// The DA lag halt's state, for hosts (ADR 0006 decision 4, "hosts show log stalled").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LogStatus {
+    /// More than [`MAX_DA_LAG`] sealed blocks are unpublished: no block opens.
+    Stalled { sealed: u64, published: u64 },
+    /// Publication caught up; blocks open again.
+    Resumed { sealed: u64, published: u64 },
+}
 
 /// The reply to one queued input.
 pub type InputReply = Result<InputReceipt, String>;
@@ -81,6 +100,8 @@ pub struct SequencerStatus {
     sealed: AtomicU64,
     /// Highest published height.
     published: AtomicU64,
+    /// The DA lag halt holds.
+    stalled: AtomicBool,
 }
 
 /// The RPC side of the input queue.
@@ -143,6 +164,12 @@ impl SequencerHandle {
         )
     }
 
+    /// Whether the log is stalled (the DA lag halt holds): hosts show "log stalled".
+    #[must_use]
+    pub fn log_stalled(&self) -> bool {
+        self.status.stalled.load(Ordering::Acquire)
+    }
+
     /// Ask the block thread to seal its open block, flush publication and stop the scheduler.
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Release);
@@ -153,9 +180,19 @@ impl SequencerHandle {
 pub struct SequencerParts {
     pub sequencer: Sequencer,
     pub sink: FileSink,
+    /// The sink's published tip (the genesis tip when empty).
+    pub published: ChainTip,
+    /// Sealed blocks after `published`, from the block store, in height order.
+    pub pending: Vec<SealedBlock>,
     pub segment_blocks: usize,
+    /// The DA lag halt threshold ([`MAX_DA_LAG`] outside tests).
+    pub max_da_lag: u64,
     /// Broadcast a seal notice to hosts.
     pub notify: Box<dyn Fn(SealNotice) + Send>,
+    /// Tell hosts the log stalled or resumed.
+    pub log_status: Box<dyn Fn(LogStatus) + Send>,
+    /// fsync samples of the durable hooks.
+    pub fsync: Arc<FsyncLog>,
 }
 
 /// Start the block and DA threads. The returned handle feeds the input queue; the join handle
@@ -165,8 +202,18 @@ pub fn start(parts: SequencerParts) -> std::io::Result<(SequencerHandle, JoinHan
     let status = Arc::new(SequencerStatus::default());
     let stop = Arc::new(AtomicBool::new(false));
     let tip = *parts.sequencer.tip();
+    let published = parts.published;
     status.sealed.store(tip.height, Ordering::Release);
-    status.published.store(tip.height, Ordering::Release);
+    status.published.store(published.height, Ordering::Release);
+    if tip.height > 0 {
+        // A crash between storing a signature and sending its notice would leave hosts without
+        // the tip's notice; send it again (hosts treat notices idempotently).
+        (parts.notify)(SealNotice {
+            height: tip.height,
+            header_hash: tip.hash,
+            state_root: tip.state_root,
+        });
+    }
     let handle = SequencerHandle {
         inputs,
         status: status.clone(),
@@ -179,9 +226,20 @@ pub fn start(parts: SequencerParts) -> std::io::Result<(SequencerHandle, JoinHan
         .segment_blocks
         .clamp(1, moor_block::MAX_SEGMENT_BLOCKS);
     let sink = parts.sink;
+    let pending = parts.pending;
     let da = std::thread::Builder::new()
         .name("rw-seq-da".into())
-        .spawn(move || da_loop(sink, tip, da_queue, segment_blocks, da_status, segments))?;
+        .spawn(move || {
+            da_loop(
+                sink,
+                published,
+                pending,
+                da_queue,
+                segment_blocks,
+                da_status,
+                segments,
+            );
+        })?;
     let block_thread = std::thread::Builder::new()
         .name("rw-seq-block".into())
         .spawn(move || {
@@ -194,6 +252,11 @@ pub fn start(parts: SequencerParts) -> std::io::Result<(SequencerHandle, JoinHan
                 blocks: Some(blocks),
                 segment_reports,
                 notify: parts.notify,
+                log_status: parts.log_status,
+                // Publication waits for a full segment, so a lower threshold could never clear.
+                max_da_lag: parts.max_da_lag.max(segment_blocks as u64),
+                fsync: parts.fsync,
+                failed: false,
                 metrics: Metrics::new(METRICS_WINDOW_BLOCKS),
             };
             block_loop.run();
@@ -231,6 +294,11 @@ struct BlockLoop {
     blocks: Option<Sender<SealedBlock>>,
     segment_reports: Receiver<(u64, u64)>,
     notify: Box<dyn Fn(SealNotice) + Send>,
+    log_status: Box<dyn Fn(LogStatus) + Send>,
+    max_da_lag: u64,
+    fsync: Arc<FsyncLog>,
+    /// Inputs could not be made durable: the open block is left to crash recovery.
+    failed: bool,
     metrics: Metrics,
 }
 
@@ -260,7 +328,15 @@ impl BlockLoop {
                 self.status.sealed.load(Ordering::Acquire),
                 self.status.published.load(Ordering::Acquire),
             );
-            let result = if sealed.saturating_sub(published) > MAX_DA_LAG {
+            let stalled = sealed.saturating_sub(published) > self.max_da_lag;
+            if stalled != self.status.stalled.swap(stalled, Ordering::AcqRel) {
+                (self.log_status)(if stalled {
+                    LogStatus::Stalled { sealed, published }
+                } else {
+                    LogStatus::Resumed { sealed, published }
+                });
+            }
+            let result = if stalled {
                 Err(format!(
                     "log stalled: {} sealed blocks are unpublished",
                     sealed - published
@@ -313,6 +389,11 @@ impl BlockLoop {
             }
             let received = self.take_inputs(deadline);
             window_closed = Some(Instant::now());
+            if self.failed {
+                error!("inputs could not be journalled; the sequencer halts (restart recovers)");
+                self.status.open.store(0, Ordering::Release);
+                break;
+            }
             if !self.seal(&received) {
                 break;
             }
@@ -322,7 +403,30 @@ impl BlockLoop {
         }
     }
 
+    /// The next input: one held back from the last group first, else the queue (waiting until
+    /// `deadline` when `wait`).
+    fn next_input(&mut self, deadline: Instant, wait: bool) -> Option<QueuedInput> {
+        if let Some(input) = self.carry.pop_front() {
+            return Some(input);
+        }
+        if !wait {
+            return self.queue.try_recv().ok();
+        }
+        match self.queue.recv_deadline(deadline) {
+            Ok(input) => Some(input),
+            Err(RecvTimeoutError::Timeout) => None,
+            Err(RecvTimeoutError::Disconnected) => {
+                self.stop.store(true, Ordering::Release);
+                None
+            }
+        }
+    }
+
     /// Run inputs on arrival until `deadline`. Returns their receipt times.
+    ///
+    /// Group commit: the input that ends the wait and every input already queued behind it (up
+    /// to [`MAX_GROUP_COMMIT`]) are journalled with one fsync, then run in order. Waiting for
+    /// more would only add latency; under load the queue fills while the fsync runs.
     fn take_inputs(&mut self, deadline: Instant) -> Vec<Instant> {
         let mut received = Vec::new();
         let mut full = false;
@@ -335,56 +439,85 @@ impl BlockLoop {
                 }
                 break;
             }
-            let input = match self.carry.pop_front() {
-                Some(input) => input,
-                None => match self.queue.recv_deadline(deadline) {
-                    Ok(input) => input,
-                    Err(RecvTimeoutError::Timeout) => break,
-                    Err(RecvTimeoutError::Disconnected) => {
-                        self.stop.store(true, Ordering::Release);
-                        break;
-                    }
-                },
+            let Some(first) = self.next_input(deadline, true) else {
+                break;
             };
-            if let Err(e) = input.entry.check() {
-                if let Some(reply) = &input.reply {
-                    let _ = reply.send(Err(format!("not a valid log entry: {e}")));
+            let mut group = vec![first];
+            while group.len() < MAX_GROUP_COMMIT {
+                match self.next_input(deadline, false) {
+                    Some(input) => group.push(input),
+                    None => break,
                 }
+            }
+            group.retain(|input| match input.entry.check() {
+                Ok(()) => true,
+                Err(e) => {
+                    if let Some(reply) = &input.reply {
+                        let _ = reply.send(Err(format!("not a valid log entry: {e}")));
+                    }
+                    false
+                }
+            });
+            if group.is_empty() {
                 continue;
             }
-            if !self.sequencer().fits(&input.entry) {
-                debug!("block full; input waits for the next block");
-                self.carry.push_front(input);
+            let entries: Vec<CommandEntry> = group.iter().map(|i| i.entry.clone()).collect();
+            let journalled = match self.sequencer().journal_inputs(&entries) {
+                Ok(n) => n,
+                Err(e) => {
+                    error!(error = %e, "inputs could not be journalled");
+                    for input in group {
+                        if let Some(reply) = input.reply {
+                            let _ = reply.send(Err(format!("the sequencer halted: {e}")));
+                        }
+                    }
+                    self.failed = true;
+                    break;
+                }
+            };
+            self.record_fsyncs();
+            if journalled < group.len() {
+                debug!("block full; inputs wait for the next block");
+                for input in group.drain(journalled..).rev() {
+                    self.carry.push_front(input);
+                }
                 full = true;
-                continue;
             }
-            let taken = Instant::now();
-            let QueuedInput {
-                entry,
-                session,
-                on_admitted,
-                received: at,
-                reply,
-            } = input;
-            let result = self
-                .sequencer()
-                .submit(entry, session, on_admitted)
-                .map_err(|e| e.to_string());
-            let done = Instant::now();
-            if result.is_ok() {
-                self.metrics.record_input(at, taken, done);
-                received.push(at);
-            } else if let Err(e) = &result {
-                error!(error = %e, "input could not run");
-            }
-            if let Some(reply) = reply {
-                let _ = reply.send(result);
+            for input in group {
+                let taken = Instant::now();
+                let QueuedInput {
+                    entry,
+                    session,
+                    on_admitted,
+                    received: at,
+                    reply,
+                } = input;
+                let result = self
+                    .sequencer()
+                    .submit(entry, session, on_admitted)
+                    .map_err(|e| e.to_string());
+                let done = Instant::now();
+                if result.is_ok() {
+                    self.metrics.record_input(at, taken, done);
+                    received.push(at);
+                } else if let Err(e) = &result {
+                    error!(error = %e, "input could not run");
+                }
+                if let Some(reply) = reply {
+                    let _ = reply.send(result);
+                }
             }
             if Instant::now() >= deadline {
                 break;
             }
         }
         received
+    }
+
+    fn record_fsyncs(&mut self) {
+        for (kind, took) in self.fsync.drain() {
+            self.metrics.record_fsync(kind, took);
+        }
     }
 
     /// Seal the open block, broadcast its notice, hand it to the DA thread. False on failure: the
@@ -433,6 +566,10 @@ impl BlockLoop {
             received,
         );
         self.drain_segment_reports();
+        self.record_fsyncs();
+        let published = self.status.published.load(Ordering::Acquire);
+        self.metrics
+            .record_da_lag(notice.height.saturating_sub(published));
         self.metrics.maybe_report(notice.height);
         if let Some(blocks) = &self.blocks
             && blocks.send(sealed.block).is_err()
@@ -447,12 +584,12 @@ impl BlockLoop {
 fn da_loop(
     mut sink: FileSink,
     mut prev: ChainTip,
+    mut pending: Vec<SealedBlock>,
     blocks: Receiver<SealedBlock>,
     segment_blocks: usize,
     status: Arc<SequencerStatus>,
     reports: Sender<(u64, u64)>,
 ) {
-    let mut pending: Vec<SealedBlock> = Vec::new();
     let mut publish = |pending: &mut Vec<SealedBlock>, prev: &mut ChainTip| -> bool {
         if pending.is_empty() {
             return true;
@@ -485,6 +622,15 @@ fn da_loop(
             }
         }
     };
+    // Sealed blocks a crash left unpublished go out first, in full segments.
+    while pending.len() >= segment_blocks {
+        let rest = pending.split_off(segment_blocks);
+        if !publish(&mut pending, &mut prev) {
+            pending.extend(rest);
+            break;
+        }
+        pending = rest;
+    }
     loop {
         match blocks.recv_timeout(Duration::from_secs(1)) {
             Ok(block) => {

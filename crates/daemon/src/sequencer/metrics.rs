@@ -23,9 +23,12 @@
 //!   produced has been handed to the hosts' publisher) and receipt to seal notice;
 //! - p50/p95 `end_block` time (root time included) and inter-block pause (from the end of one
 //!   block's input window to the next block's opening).
+//! - p50/p95 fsync time of the journal (one per group commit), the block store and the signing
+//!   guard (S1-2), and the DA lag (sealed minus published) at the window's end.
 
 use std::time::{Duration, Instant};
 
+use moor_kernel::tasks::sequencer_recovery::FsyncKind;
 use serde_json::json;
 use tracing::info;
 
@@ -69,6 +72,10 @@ struct Window {
     end_block: Samples,
     pause: Samples,
     queue_wait: Samples,
+    fsync_journal: Samples,
+    fsync_store: Samples,
+    fsync_guard: Samples,
+    da_lag: u64,
 }
 
 /// The sequencer's metrics. Owned by the block thread; the DA thread reports through
@@ -137,6 +144,23 @@ impl Metrics {
     pub fn record_pause(&mut self, pause: Duration) {
         self.window.pause.push(pause);
         self.total.pause.push(pause);
+    }
+
+    /// A durable write's fsync took `took`.
+    pub fn record_fsync(&mut self, kind: FsyncKind, took: Duration) {
+        for w in [&mut self.window, &mut self.total] {
+            match kind {
+                FsyncKind::Journal => w.fsync_journal.push(took),
+                FsyncKind::Store => w.fsync_store.push(took),
+                FsyncKind::Guard => w.fsync_guard.push(took),
+            }
+        }
+    }
+
+    /// Sealed minus published blocks now.
+    pub fn record_da_lag(&mut self, lag: u64) {
+        self.window.da_lag = lag;
+        self.total.da_lag = lag;
     }
 
     /// A segment of `blocks` blocks was published as `bytes` compressed bytes.
@@ -211,6 +235,21 @@ fn log_summary(scope: &str, height: u64, elapsed: Duration, w: &mut Window) {
             "p95": w.pause.quantile_ms(0.95),
             "max": w.pause.max_ms(),
         },
+        "fsync_journal_ms": {
+            "n": w.fsync_journal.0.len(),
+            "p50": w.fsync_journal.quantile_ms(0.50),
+            "p95": w.fsync_journal.quantile_ms(0.95),
+            "max": w.fsync_journal.max_ms(),
+        },
+        "fsync_store_ms": {
+            "p50": w.fsync_store.quantile_ms(0.50),
+            "p95": w.fsync_store.quantile_ms(0.95),
+        },
+        "fsync_guard_ms": {
+            "p50": w.fsync_guard.quantile_ms(0.50),
+            "p95": w.fsync_guard.quantile_ms(0.95),
+        },
+        "da_lag_blocks": w.da_lag,
     });
     info!(target: "rw_sequencer_metrics", "{summary}");
 }

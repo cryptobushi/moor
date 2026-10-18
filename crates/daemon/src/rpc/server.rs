@@ -151,6 +151,26 @@ impl RpcServer {
         })
     }
 
+    /// Sequencer mode: tell every connected client when the log stalls (the DA lag halt) and
+    /// when it resumes. Hosts show system messages as they are.
+    pub fn log_status_notifier(&self) -> Box<dyn Fn(crate::sequencer::LogStatus) + Send> {
+        let handler = self.message_handler.clone();
+        Box::new(move |status| {
+            let message = match status {
+                crate::sequencer::LogStatus::Stalled { sealed, published } => format!(
+                    "*** World log stalled: {} sealed blocks are unpublished (sealed {sealed}, \
+                     published {published}). New commands wait until publication catches up. ***",
+                    sealed - published
+                ),
+                crate::sequencer::LogStatus::Resumed { sealed, published } => format!(
+                    "*** World log publishing again (sealed {sealed}, published {published}). ***"
+                ),
+            };
+            tracing::warn!(?status, "sequencer log status");
+            handler.broadcast_system_message(&message);
+        })
+    }
+
     pub fn request_loop(
         &self,
         rpc_endpoint: String,

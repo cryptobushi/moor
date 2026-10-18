@@ -229,6 +229,20 @@ pub struct Args {
 
     #[arg(
         long,
+        value_name = "FILE",
+        help = "Sequencer mode: signing guard file, exclusively locked while the key is in use                 (default: <sequencer-key>.guard)"
+    )]
+    pub sequencer_guard: Option<PathBuf>,
+
+    #[arg(
+        long,
+        value_name = "DIR",
+        help = "Sequencer mode: directory of the input journal and local block store                 (default: <data-dir>/sequencer)"
+    )]
+    pub sequencer_state: Option<PathBuf>,
+
+    #[arg(
+        long,
         value_name = "DIR",
         help = "Sequencer mode: FileSink directory sealed segments are published to \
                 (default: <data-dir>/fsink)"
@@ -241,6 +255,14 @@ pub struct Args {
         help = "Sequencer mode: blocks per published segment (default 10)"
     )]
     pub sequencer_segment_blocks: Option<usize>,
+
+    #[arg(
+        long,
+        value_name = "N",
+        hide = true,
+        help = "Sequencer mode, tests only: the DA lag halt threshold (default 300 blocks)"
+    )]
+    pub sequencer_max_da_lag: Option<u64>,
 
     #[arg(
         long,
@@ -489,8 +511,17 @@ impl Args {
         if let Some(path) = &self.sequencer_sink {
             config.sequencer.sink_dir = Some(path.clone());
         }
+        if let Some(path) = &self.sequencer_guard {
+            config.sequencer.guard_file = Some(path.clone());
+        }
+        if let Some(path) = &self.sequencer_state {
+            config.sequencer.state_dir = Some(path.clone());
+        }
         if let Some(n) = self.sequencer_segment_blocks {
             config.sequencer.segment_blocks = n;
+        }
+        if let Some(n) = self.sequencer_max_da_lag {
+            config.sequencer.max_da_lag = n;
         }
         if let Some(player) = self.dev_player {
             config.sequencer.dev_player = Some(player);

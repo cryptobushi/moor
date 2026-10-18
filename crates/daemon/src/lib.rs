@@ -529,16 +529,88 @@ fn load_sequencer_key(path: &Path) -> Result<moor_block::SequencerKey, Report> {
         .ok_or_else(|| eyre!("sequencer key {} is not a valid secret", path.display()))
 }
 
-/// Sequencer mode (RuneWorld ADR 0006): take the scheduler under a block driver, continue the
-/// published chain (or start one at genesis), and start the block and DA threads.
+fn sequencer_state_dir(config: &Config, data_dir: &Path) -> PathBuf {
+    config
+        .sequencer
+        .state_dir
+        .clone()
+        .unwrap_or_else(|| data_dir.join("sequencer"))
+}
+
+/// Sequencer recovery step 1 (ADR 0006 decision 4), before anything runs on the database: open
+/// the local block store and keep the database only if its state root is a sealed block's (or
+/// the stored unsigned block's). Otherwise the database is moved aside to `<db>.discarded` and
+/// reopened empty, so the genesis import runs again; the sealed blocks are re-executed on it.
+/// Rebuilding from a verified checkpoint replaces genesis once checkpoint import exists (S1-5).
+fn prepare_sequencer_database(
+    config: &Config,
+    data_dir: &Path,
+    db_path: &Path,
+    database: TxDB,
+    fresh: bool,
+) -> Result<(TxDB, bool, moor_block::durable::BlockStore), Report> {
+    use moor_kernel::tasks::sequencer_recovery::database_resumable;
+
+    let state_dir = sequencer_state_dir(config, data_dir);
+    let store = moor_block::durable::BlockStore::open(state_dir.join("blocks"))
+        .map_err(|e| eyre!("opening the sequencer block store: {e}"))?;
+    if fresh || store.chain().is_none() {
+        return Ok((database, fresh, store));
+    }
+    let root = moor_db::Database::state_root(&database)
+        .map_err(|e| eyre!("state root of the database: {e}"))?
+        .root;
+    if database_resumable(&store, &root) {
+        info!(
+            root = %moor_block::hex(&root),
+            sealed = store.sealed_height(),
+            "sequencer recovery: the database's state root is a sealed block's; kept"
+        );
+        return Ok((database, false, store));
+    }
+    warn!(
+        root = %moor_block::hex(&root),
+        sealed = store.sealed_height(),
+        "sequencer recovery: the database's state root is no sealed block's (a crash mid-block); \
+         rebuilding from genesis"
+    );
+    drop(database);
+    let mut discarded = db_path.as_os_str().to_owned();
+    discarded.push(".discarded");
+    let discarded = PathBuf::from(discarded);
+    if discarded.exists() {
+        fs::remove_dir_all(&discarded)
+            .map_err(|e| eyre!("removing {}: {e}", discarded.display()))?;
+    }
+    fs::rename(db_path, &discarded)
+        .map_err(|e| eyre!("moving the database aside to {}: {e}", discarded.display()))?;
+    let (database, fresh) =
+        TxDB::try_open(Some(db_path), config.database.clone().unwrap_or_default())?;
+    if !fresh {
+        bail!("the database at {} did not reopen empty", db_path.display());
+    }
+    Ok((database, true, store))
+}
+
+/// Sequencer mode (RuneWorld ADR 0006): take the scheduler under a block driver, recover the
+/// chain from the block store and journal (or start one at genesis), and start the block and DA
+/// threads.
 fn start_sequencer(
     config: &Config,
     data_dir: &Path,
     scheduler: &Scheduler,
     rpc_server: &Arc<RpcServer>,
+    mut store: moor_block::durable::BlockStore,
+    fresh_db: bool,
 ) -> Result<(sequencer::SequencerHandle, std::thread::JoinHandle<()>), Report> {
-    use moor_block::{ChainParams, DaSink, EventPolicy, FileSink};
-    use moor_kernel::tasks::sequencer::{NoHooks, Sequencer, SequencerParams};
+    use moor_block::{
+        ChainTip, EventPolicy, FileSink,
+        durable::{Journal, SigningGuard, StoreChain},
+    };
+    use moor_kernel::tasks::{
+        sequencer::SequencerParams,
+        sequencer_recovery::{DurableParts, FsyncLog, RecoveryError, resume},
+    };
 
     let key_path = config
         .sequencer
@@ -546,6 +618,12 @@ fn start_sequencer(
         .as_ref()
         .ok_or_else(|| eyre!("--sequencer needs --sequencer-key"))?;
     let key = load_sequencer_key(key_path)?;
+    let guard_path = config.sequencer.guard_file.clone().unwrap_or_else(|| {
+        let mut path = key_path.as_os_str().to_owned();
+        path.push(".guard");
+        PathBuf::from(path)
+    });
+    let state_dir = sequencer_state_dir(config, data_dir);
     let sink_dir = config
         .sequencer
         .sink_dir
@@ -559,68 +637,142 @@ fn start_sequencer(
         .as_ref()
         .map(|path| dev_identity::load(path))
         .transpose()?;
+    let genesis_setup = |scheduler: &Scheduler| -> Result<(), Report> {
+        if let (Some(identity), Some(player)) = (&dev_identity, config.sequencer.dev_player) {
+            // Genesis set-up (ADR 0005 `reassign_wallet`): part of the genesis state, so a
+            // replayer must apply the same assignment before block 1.
+            scheduler
+                .assign_wallet(Obj::mk_id(player), identity.address())
+                .map_err(|e| eyre!("binding the development wallet: {e}"))?;
+            info!(
+                player,
+                wallet = %identity.address(),
+                "genesis: development wallet bound"
+            );
+        }
+        Ok(())
+    };
+    let known_chain = match store.chain() {
+        Some(chain) => {
+            if chain.sequencer != key.address() {
+                bail!(
+                    "the block store belongs to sequencer {}, not this key's {}",
+                    chain.sequencer,
+                    key.address()
+                );
+            }
+            if fresh_db {
+                genesis_setup(scheduler)?;
+            }
+            Some(chain)
+        }
+        None => {
+            if sink.tip().is_some() {
+                bail!(
+                    "FileSink {} has a published chain but {} has no block store; this state \
+                     predates the journal (S1-2): start from a fresh data directory and sink",
+                    sink_dir.display(),
+                    state_dir.display()
+                );
+            }
+            genesis_setup(scheduler)?;
+            None
+        }
+    };
     let driver = scheduler
         .start_block_driver(rpc_server.clone())
         .map_err(|e| eyre!("Failed to start the block driver: {e}"))?;
-    let params = SequencerParams::default();
-    let sequencer = match sink.tip() {
-        Some(tip) => {
-            let first = sink
-                .read(1, 1)
-                .map_err(|e| eyre!("reading the first segment: {e}"))?;
-            let genesis_root = first
-                .first()
-                .map(|segment| segment.prev().state_root)
-                .ok_or_else(|| eyre!("FileSink has a tip but no first segment"))?;
-            let chain = ChainParams {
-                genesis_root,
-                sequencer: key.address(),
-            };
-            let last = sink
-                .read(tip.height, tip.height)
-                .map_err(|e| eyre!("reading the tip segment: {e}"))?;
-            if let Some(segment) = last.last() {
-                segment
-                    .verify(&chain)
-                    .map_err(|e| eyre!("the published tip was not signed by this key: {e}"))?;
-            }
-            let root = driver
-                .state_root()
-                .map_err(|e| eyre!("state root: {e}"))?
-                .root;
-            if root != tip.state_root {
+    let root = driver
+        .state_root()
+        .map_err(|e| eyre!("state root: {e}"))?
+        .root;
+    let chain = match known_chain {
+        Some(chain) => {
+            if fresh_db && root != chain.genesis_root {
                 bail!(
-                    "the database's state root {} is not the published tip's {} at height {}; \
-                     recovery from a crash mid-block is not implemented yet (S1-2): restore the \
-                     database from genesis and replay",
+                    "the genesis built from this core has root {}, the chain's genesis root is \
+                     {}: start with the same core and genesis options",
                     moor_block::hex(&root),
-                    moor_block::hex(&tip.state_root),
-                    tip.height
+                    moor_block::hex(&chain.genesis_root)
                 );
             }
-            info!(
-                height = tip.height,
-                "sequencer continues the published chain"
-            );
-            Sequencer::new(driver, key, genesis_root, tip, params, Box::new(NoHooks))
+            chain
         }
         None => {
-            if let (Some(identity), Some(player)) = (&dev_identity, config.sequencer.dev_player) {
-                // Genesis set-up (ADR 0005 `reassign_wallet`): part of the genesis state, so a
-                // replayer must apply the same assignment before block 1.
-                scheduler
-                    .assign_wallet(Obj::mk_id(player), identity.address())
-                    .map_err(|e| eyre!("binding the development wallet: {e}"))?;
-                info!(
-                    player,
-                    wallet = %identity.address(),
-                    "genesis: development wallet bound"
-                );
-            }
-            Sequencer::genesis(driver, key, params, Box::new(NoHooks))
-                .map_err(|e| eyre!("genesis: {e}"))?
+            let chain = StoreChain {
+                genesis_root: root,
+                sequencer: key.address(),
+            };
+            store
+                .init_chain(chain)
+                .map_err(|e| eyre!("recording the chain in the block store: {e}"))?;
+            chain
         }
     };
+    let guard = SigningGuard::open(&guard_path, chain)
+        .map_err(|e| eyre!("opening the signing guard {}: {e}", guard_path.display()))?;
+    let (journal, open) =
+        Journal::open(state_dir.join("journal")).map_err(|e| eyre!("opening the journal: {e}"))?;
+
+    // What the sink lacks of the sealed chain goes to the DA thread first.
+    let published = sink
+        .tip()
+        .unwrap_or_else(|| ChainTip::genesis(&chain.genesis_root));
+    let sealed = store.sealed_height();
+    if published.height > sealed {
+        bail!(
+            "FileSink tip {} is above the block store's sealed height {sealed}",
+            published.height
+        );
+    }
+    if published.height > 0
+        && store
+            .header(published.height)
+            .map(moor_block::BlockHeader::hash)
+            != Some(published.hash)
+    {
+        bail!(
+            "FileSink block {} is not the block store's block at that height",
+            published.height
+        );
+    }
+    let mut pending = (published.height + 1..=sealed)
+        .map(|h| store.sealed_block(h))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| eyre!("reading sealed blocks: {e}"))?;
+
+    let fsync = Arc::new(FsyncLog::default());
+    let started = std::time::Instant::now();
+    let (sequencer, recovery) = resume(
+        driver,
+        key,
+        SequencerParams::default(),
+        DurableParts {
+            journal,
+            open,
+            store,
+            guard,
+        },
+        fsync.clone(),
+        None,
+    )
+    .map_err(|e| match e {
+        RecoveryError::Rebuild(_) => eyre!("{e} (the startup check should have rebuilt it)"),
+        e => eyre!("sequencer recovery: {e}"),
+    })?;
+    info!(
+        base = recovery.base,
+        replayed = recovery.replayed,
+        interrupted = ?recovery.interrupted,
+        resealed = ?recovery.resealed.as_ref().map(|s| s.notice.height),
+        tip = sequencer.tip().height,
+        unpublished = pending.len() + usize::from(recovery.resealed.is_some()),
+        ms = started.elapsed().as_millis() as u64,
+        "sequencer recovered"
+    );
+    if let Some(resealed) = recovery.resealed {
+        pending.push(resealed.block);
+    }
     let genesis_root = *sequencer.genesis_root();
     if config.deterministic.domain_salt != genesis_root {
         warn!(
@@ -636,6 +788,8 @@ fn start_sequencer(
         genesis_root = %moor_block::hex(&genesis_root),
         sequencer = %sequencer.chain_params().sequencer,
         sink = %sink_dir.display(),
+        state = %state_dir.display(),
+        guard = %guard_path.display(),
         "sequencer ready"
     );
     let dev_signer = match (dev_identity, config.sequencer.dev_player) {
@@ -653,8 +807,13 @@ fn start_sequencer(
     let (handle, block_thread) = sequencer::start(sequencer::SequencerParts {
         sequencer,
         sink,
+        published,
+        pending,
         segment_blocks: config.sequencer.segment_blocks,
+        max_da_lag: config.sequencer.max_da_lag,
         notify: rpc_server.seal_notifier(),
+        log_status: rpc_server.log_status_notifier(),
+        fsync,
     })?;
     rpc_server.attach_sequencer(handle.clone(), dev_signer);
     Ok((handle, block_thread))
@@ -803,6 +962,20 @@ pub fn run(runtime_config: DaemonRuntimeConfig, runtime: DaemonRuntime) -> Resul
         Some(&paths.db_path),
         config.database.clone().unwrap_or_default(),
     )?;
+    // Sequencer recovery step 1 (ADR 0006 decision 4): keep the database only if its state root
+    // is a sealed block's; otherwise rebuild it at genesis (the import below runs again).
+    let (database, freshly_made, sequencer_store) = if config.sequencer.enabled {
+        let (database, fresh, store) = prepare_sequencer_database(
+            &config,
+            &paths.data_dir,
+            &paths.db_path,
+            database,
+            freshly_made,
+        )?;
+        (database, fresh, Some(store))
+    } else {
+        (database, freshly_made, None)
+    };
     let database = Box::new(database);
     info!(path = ?paths.db_path, "Opened database");
 
@@ -1123,8 +1296,15 @@ pub fn run(runtime_config: DaemonRuntimeConfig, runtime: DaemonRuntime) -> Resul
     // Start the scheduler (spawns timer + worker-response threads internally), or, in sequencer
     // mode, the block thread that owns it.
     let (scheduler_loop_jh, sequencer_handle) = if config.sequencer.enabled {
-        let (handle, block_thread) =
-            start_sequencer(&config, &paths.data_dir, &scheduler, &rpc_server)?;
+        let store = sequencer_store.ok_or_else(|| eyre!("sequencer block store not opened"))?;
+        let (handle, block_thread) = start_sequencer(
+            &config,
+            &paths.data_dir,
+            &scheduler,
+            &rpc_server,
+            store,
+            freshly_made,
+        )?;
         (SchedulerJoin::Sequencer(block_thread), Some(handle))
     } else {
         let threads = scheduler

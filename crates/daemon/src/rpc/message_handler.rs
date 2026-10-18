@@ -165,6 +165,9 @@ pub trait MessageHandler: RuntimeApi + Send + Sync {
     /// Sequencer mode: remember the latest seal notice for `RequestChainStatus`.
     fn record_seal(&self, _notice: moor_kernel::tasks::sequencer::SealNotice) {}
 
+    /// Send a system message to every connected client (sequencer "log stalled").
+    fn broadcast_system_message(&self, _message: &str) {}
+
     /// Switch the player for the given connection object to the new player.
     fn switch_player(
         &self,
@@ -477,6 +480,23 @@ impl MessageHandler for RpcMessageHandler {
             "{unexpected} extra disconnect task(s) submitted"
         );
         Ok(())
+    }
+
+    fn broadcast_system_message(&self, message: &str) {
+        for connection in self.connections.connections() {
+            let Ok(clients) = self.connections.client_ids_for(connection) else {
+                continue;
+            };
+            let player = clients
+                .first()
+                .and_then(|c| self.connections.player_object_for_client(*c))
+                .unwrap_or(connection);
+            for client in clients {
+                if let Err(e) = self.send_system_message(client, player, message.to_string()) {
+                    warn!(error = ?e, %client, "could not send a system message");
+                }
+            }
+        }
     }
 
     fn attach_sequencer(
