@@ -3550,7 +3550,7 @@ mod durability {
         envelope::scope,
         tasks::{NarrativeEvent, NoopClientSession, NoopSystemControl, Session, SessionError},
     };
-    use moor_db::{Database, DatabaseConfig, TxDB};
+    use moor_db::{Database, DatabaseConfig, TxDB, state_root::checkpoint::CheckpointDir};
     use moor_kernel::{
         config::Config,
         tasks::{
@@ -3558,10 +3558,10 @@ mod durability {
             block_driver::{BlockDriver, BlockEventKind, BlockInput},
             block_events,
             scheduler::Scheduler,
-            sequencer::{SequencerError, SequencerParams},
+            sequencer::{CheckpointPolicy, SequencerError, SequencerParams},
             sequencer_recovery::{
                 DurableHooks, DurableParts, FaultHook, FaultPoint, FsyncLog, RecoveryError,
-                database_resumable, resume,
+                database_resumable, resume, usable_checkpoint,
             },
         },
     };
@@ -3630,22 +3630,69 @@ mod durability {
         TxDB::try_open(Some(dir), DatabaseConfig::default()).expect("open database")
     }
 
+    /// How recovery step 1 left the database.
+    struct Prepared {
+        db: TxDB,
+        /// Empty: the genesis is built on it.
+        fresh: bool,
+        /// The previous database was discarded.
+        rebuilt: bool,
+        /// Restored from the checkpoint at this height.
+        checkpoint: Option<u64>,
+    }
+
     /// Recovery step 1: keep the database only if its root is a sealed block's (or the stored
-    /// unsigned block's); otherwise rebuild it at genesis (no checkpoint import yet).
-    fn prepare_db(dir: &Path, store: &BlockStore) -> (TxDB, bool, bool) {
+    /// unsigned block's); otherwise rebuild it from the newest usable checkpoint in `checkpoints`,
+    /// or at genesis.
+    fn prepare_db(dir: &Path, store: &BlockStore, checkpoints: Option<&CheckpointDir>) -> Prepared {
         let (db, fresh) = open_db(dir);
-        if fresh || store.chain().is_none() {
-            return (db, fresh, false);
+        if store.chain().is_none() {
+            return Prepared {
+                db,
+                fresh,
+                rebuilt: false,
+                checkpoint: None,
+            };
         }
-        let root = db.state_root().expect("state root").root;
-        if database_resumable(store, &root) {
-            return (db, false, false);
+        let mut rebuilt = false;
+        let db = if fresh {
+            db
+        } else {
+            let root = db.state_root().expect("state root").root;
+            if database_resumable(store, &root) {
+                return Prepared {
+                    db,
+                    fresh: false,
+                    rebuilt: false,
+                    checkpoint: None,
+                };
+            }
+            drop(db);
+            fs::remove_dir_all(dir).expect("remove database");
+            rebuilt = true;
+            let (db, fresh) = open_db(dir);
+            assert!(fresh, "a removed database reopens fresh");
+            db
+        };
+        if let Some(stored) = checkpoints.and_then(|cps| usable_checkpoint(cps, store)) {
+            let checkpoint = stored.checkpoint().expect("verified checkpoint");
+            let root = db
+                .import_checkpoint(&checkpoint)
+                .expect("restore checkpoint");
+            assert_eq!(root.root, stored.header.state_root);
+            return Prepared {
+                db,
+                fresh: false,
+                rebuilt,
+                checkpoint: Some(stored.header.height),
+            };
         }
-        drop(db);
-        fs::remove_dir_all(dir).expect("remove database");
-        let (db, fresh) = open_db(dir);
-        assert!(fresh, "a removed database reopens fresh");
-        (db, true, true)
+        Prepared {
+            db,
+            fresh: true,
+            rebuilt,
+            checkpoint: None,
+        }
     }
 
     /// A deterministic scheduler under a block driver; at genesis (`fresh`) the textdump, the
@@ -3887,12 +3934,27 @@ mod durability {
     }
 
     /// One sequencer process: recover from whatever `dir` holds, then run the script to
-    /// `BLOCKS` blocks under `schedule`. Kills itself at `crash`.
-    fn run_child(dir: &Path, schedule: &[usize], crash: Option<Crash>, group: bool, player: Obj) {
+    /// `BLOCKS` blocks under `schedule`. Kills itself at `crash`. With `checkpoint_every > 0` it
+    /// writes a checkpoint after every such seal and recovers from the newest usable one.
+    fn run_child(
+        dir: &Path,
+        schedule: &[usize],
+        crash: Option<Crash>,
+        group: bool,
+        player: Obj,
+        checkpoint_every: u64,
+    ) {
         let state = dir.join("state");
         let mut store = BlockStore::open(state.join("blocks")).expect("block store");
         let (journal, open) = Journal::open(state.join("journal")).expect("journal");
-        let (db, fresh, rebuilt) = prepare_db(&dir.join("db"), &store);
+        let checkpoints = (checkpoint_every > 0)
+            .then(|| CheckpointDir::open(state.join("checkpoints")).expect("checkpoint dir"));
+        let Prepared {
+            db,
+            fresh,
+            rebuilt,
+            checkpoint,
+        } = prepare_db(&dir.join("db"), &store, checkpoints.as_ref());
         let driver = start_driver(db, fresh);
         let key = sequencer_key();
         if store.chain().is_none() {
@@ -3953,6 +4015,14 @@ mod durability {
             fault,
         )
         .unwrap_or_else(|e| panic!("recovery failed: {e}"));
+        if let Some(dir) = checkpoints {
+            seq.set_checkpoints(Some(CheckpointPolicy {
+                every: checkpoint_every,
+                keep: 2,
+                publish_every: 0,
+                ..CheckpointPolicy::new(dir, "test")
+            }));
+        }
         let notices = dir.join("notices");
         let notice = |n: &moor_kernel::tasks::sequencer::SealNotice| {
             append_line(
@@ -3980,7 +4050,8 @@ mod durability {
             });
         }
         println!(
-            "RECOVERY rebuilt={rebuilt} base={} replayed={} {:?} resealed={:?} tip={}",
+            "RECOVERY rebuilt={rebuilt} checkpoint={checkpoint:?} base={} replayed={} {:?} \
+             resealed={:?} tip={}",
             recovery.base,
             recovery.replayed,
             recovery.interrupted,
@@ -4068,8 +4139,22 @@ mod durability {
                 .parse()
                 .expect("player number"),
         );
-        run_child(Path::new(&dir), &schedule, crash, group, player);
+        let checkpoint_every = std::env::var(CHECKPOINT_ENV)
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        run_child(
+            Path::new(&dir),
+            &schedule,
+            crash,
+            group,
+            player,
+            checkpoint_every,
+        );
     }
+
+    /// Checkpoint cadence for a child (blocks; unset or 0 = no checkpoints).
+    const CHECKPOINT_ENV: &str = "RW_KILL_CHECKPOINTS";
 
     /// The object number the script's delegation creates. Fixed by deterministic ids.
     const PLAYER: i32 = 7;
@@ -4079,7 +4164,7 @@ mod durability {
         stdout: String,
     }
 
-    fn run(dir: &Path, schedule: &[usize], crash: &str, group: bool) -> Run {
+    fn run(dir: &Path, schedule: &[usize], crash: &str, group: bool, checkpoints: u64) -> Run {
         let schedule = schedule
             .iter()
             .map(ToString::to_string)
@@ -4098,6 +4183,7 @@ mod durability {
             .env("RW_KILL_AT", crash)
             .env("RW_KILL_GROUP", if group { "1" } else { "0" })
             .env(PLAYER_ENV, PLAYER.to_string())
+            .env(CHECKPOINT_ENV, checkpoints.to_string())
             .output()
             .expect("run child");
         let stdout = String::from_utf8_lossy(&out.stdout).into_owned()
@@ -4194,10 +4280,13 @@ mod durability {
         crashes: &'static [&'static str],
         group: bool,
         lose_db: bool,
+        /// Checkpoint cadence (0 = none).
+        checkpoints: u64,
     }
 
     struct Outcome {
         name: &'static str,
+        checkpoints: u64,
         schedule: Vec<usize>,
         recovery: Vec<String>,
         resealed: Vec<u64>,
@@ -4209,7 +4298,7 @@ mod durability {
         let mut recovery = Vec::new();
         let mut resealed_heights = Vec::new();
         for crash in case.crashes {
-            let r = run(dir.path(), &PLANNED, crash, case.group);
+            let r = run(dir.path(), &PLANNED, crash, case.group, case.checkpoints);
             assert!(
                 r.killed,
                 "{}: {crash} did not kill the child:\n{}",
@@ -4226,7 +4315,7 @@ mod durability {
                 fs::remove_dir_all(dir.path().join("db")).expect("remove db");
             }
         }
-        let r = run(dir.path(), &PLANNED, "", case.group);
+        let r = run(dir.path(), &PLANNED, "", case.group, case.checkpoints);
         assert!(!r.killed, "{}: the recovery run was killed", case.name);
         recovery.extend(
             r.stdout
@@ -4238,6 +4327,7 @@ mod durability {
         let (schedule, _) = chain_events(dir.path());
         Outcome {
             name: case.name,
+            checkpoints: case.checkpoints,
             schedule,
             recovery,
             resealed: resealed_heights,
@@ -4251,96 +4341,119 @@ mod durability {
             crashes: &["mid:4:2"],
             group: false,
             lose_db: false,
+            checkpoints: 0,
         },
         Case {
             name: "mid-input (block 1, before any seal)",
             crashes: &["mid:1:1"],
             group: false,
             lose_db: false,
+            checkpoints: 0,
         },
         Case {
             name: "after journal write (block 2, input 1)",
             crashes: &["journal:2:1"],
             group: false,
             lose_db: false,
+            checkpoints: 0,
         },
         Case {
             name: "after journal write (block 4, input 2)",
             crashes: &["journal:4:2"],
             group: false,
             lose_db: false,
+            checkpoints: 0,
         },
         Case {
             name: "after journal write, group commit of 3",
             crashes: &["journal:4:3"],
             group: true,
             lose_db: false,
+            checkpoints: 0,
         },
         Case {
             name: "after open of an empty block",
             crashes: &["opened:3"],
             group: false,
             lose_db: false,
+            checkpoints: 0,
         },
         Case {
             name: "after seal write (block 4)",
             crashes: &["unsigned:4"],
             group: false,
             lose_db: false,
+            checkpoints: 0,
         },
         Case {
             name: "after seal write (empty block 3)",
             crashes: &["unsigned:3"],
             group: false,
             lose_db: false,
+            checkpoints: 0,
         },
         Case {
             name: "after guard write (block 4)",
             crashes: &["guard:4"],
             group: false,
             lose_db: false,
+            checkpoints: 0,
         },
         Case {
             name: "after seal write, database persisted (block 4)",
             crashes: &["settled-unsigned:4"],
             group: false,
             lose_db: false,
+            checkpoints: 0,
         },
         Case {
             name: "after guard write, database persisted (block 4)",
             crashes: &["settled-guard:4"],
             group: false,
             lose_db: false,
+            checkpoints: 0,
         },
         Case {
             name: "after journal write, database persisted (block 4, input 2)",
             crashes: &["settled-journal:4:2"],
             group: false,
             lose_db: false,
+            checkpoints: 0,
         },
         Case {
             name: "after sign (block 4)",
             crashes: &["signed:4"],
             group: false,
             lose_db: false,
+            checkpoints: 0,
         },
         Case {
             name: "after publish (segment 3-4)",
             crashes: &["published:4"],
             group: false,
             lose_db: false,
+            checkpoints: 0,
         },
         Case {
             name: "crash again during recovery (guard, then sign)",
             crashes: &["guard:4", "signed:4"],
             group: false,
             lose_db: false,
+            checkpoints: 0,
         },
         Case {
             name: "after sign, database lost",
             crashes: &["signed:6"],
             group: false,
             lose_db: true,
+            checkpoints: 0,
+        },
+        Case {
+            name: "mid-input (block 7, input 2), checkpoints every 4 blocks",
+            crashes: &["mid:7:2"],
+            group: false,
+            lose_db: false,
+            checkpoints: 4,
         },
     ];
 
@@ -4362,7 +4475,7 @@ mod durability {
         for outcome in &outcomes {
             if !references.contains_key(&outcome.schedule) {
                 let dir = tempfile::tempdir().expect("tempdir");
-                let r = run(dir.path(), &outcome.schedule, "", false);
+                let r = run(dir.path(), &outcome.schedule, "", false, 0);
                 assert!(!r.killed);
                 references.insert(outcome.schedule.clone(), dir);
             }
@@ -4423,6 +4536,16 @@ mod durability {
                 "{}: seal notices",
                 o.name
             );
+            if o.checkpoints > 0 {
+                assert!(
+                    o.recovery
+                        .iter()
+                        .any(|r| r.contains("rebuilt=true checkpoint=Some(")),
+                    "{}: recovery did not restore a checkpoint: {:?}",
+                    o.name,
+                    o.recovery
+                );
+            }
             matrix.push(format!(
                 "| {} | {:?} | {} | identical |",
                 o.name,
@@ -5253,5 +5376,400 @@ mod meter_perf {
             v.sort_by(|a, b| a.partial_cmp(b).unwrap());
             println!("PERF meter {name}: median {:.1} us/command (min {:.1})", v[v.len() / 2], v[0]);
         }
+    }
+}
+
+// --- Checkpoints (S1-5) ----------------------------------------------------------------------
+
+mod checkpoint {
+    use std::{
+        path::Path,
+        sync::{Arc, MutexGuard},
+        time::{Duration, Instant},
+    };
+
+    use moor_common::{
+        deterministic::{self, BlockContext, DeterministicMode},
+        tasks::{NoopClientSession, NoopSystemControl, Session, SessionError, SessionFactory},
+    };
+    use moor_db::{
+        Database, DatabaseConfig, TxDB,
+        state_root::{
+            RELATIONS, StateRoot,
+            checkpoint::{Checkpoint, CheckpointError},
+        },
+    };
+    use moor_kernel::{
+        config::Config,
+        tasks::{
+            NoopTasksDb,
+            block_driver::{BlockDriver, BlockInput, BlockOutput},
+            scheduler::Scheduler,
+        },
+    };
+    use moor_var::Obj;
+    use moor_vm::FeaturesConfig;
+
+    use super::{LOCK, common::load_textdump};
+
+    struct Factory;
+    impl SessionFactory for Factory {
+        fn mk_background_session(
+            self: Arc<Self>,
+            _player: &Obj,
+        ) -> Result<Arc<dyn Session>, SessionError> {
+            Ok(Arc::new(NoopClientSession::new()))
+        }
+    }
+
+    /// The stripped core's language features (`tools/sequencer-soak/soak.sh`).
+    fn core_features() -> FeaturesConfig {
+        FeaturesConfig {
+            rich_notify: true,
+            type_dispatch: true,
+            flyweight_type: true,
+            bool_type: true,
+            symbol_type: true,
+            use_boolean_returns: true,
+            custom_errors: true,
+            use_uuobjids: true,
+            anonymous_objects: true,
+            use_symbols_in_builtins: true,
+            ..FeaturesConfig::default()
+        }
+    }
+
+    fn driver_on(db: &TxDB, features: &FeaturesConfig) -> BlockDriver {
+        let scheduler = Scheduler::new(
+            semver::Version::new(0, 1, 0),
+            Box::new(db.clone()),
+            Box::new(NoopTasksDb {}),
+            Arc::new(Config {
+                deterministic: DeterministicMode::on(),
+                features: Arc::new(features.clone()),
+                ..Config::default()
+            }),
+            Arc::new(NoopSystemControl::default()),
+            None,
+            None,
+        );
+        scheduler
+            .start_block_driver(Arc::new(Factory))
+            .expect("start block driver")
+    }
+
+    fn context(height: u64) -> BlockContext {
+        BlockContext {
+            height,
+            timestamp: 1_700_000_000 + height,
+            seed: [height as u8; 32],
+        }
+    }
+
+    fn run(driver: &mut BlockDriver, height: u64, inputs: &[BlockInput]) -> BlockOutput {
+        let inputs = inputs
+            .iter()
+            .map(|i| {
+                let session: Arc<dyn Session> = Arc::new(NoopClientSession::new());
+                (i.clone(), session)
+            })
+            .collect();
+        driver.run_block(context(height), inputs)
+    }
+
+    fn eval(player: Obj, code: &str) -> BlockInput {
+        BlockInput::Eval {
+            player,
+            code: code.to_string(),
+        }
+    }
+
+    fn root(out: &BlockOutput) -> StateRoot {
+        out.state_root.clone().expect("root taken").expect("root")
+    }
+
+    struct Restored {
+        bytes: Vec<u8>,
+        db: TxDB,
+        root: StateRoot,
+        export: Duration,
+        parse: Duration,
+        import: Duration,
+        _dir: tempfile::TempDir,
+    }
+
+    /// Export the driver's state as the checkpoint at `height`, verify it and restore it into a
+    /// fresh on-disk database.
+    fn export_and_restore(driver: &BlockDriver, height: u64) -> Restored {
+        let started = Instant::now();
+        let capture = driver.capture_checkpoint().expect("capture");
+        let (header, bytes) = capture
+            .encode(height, [7; 32], "test")
+            .expect("encode checkpoint");
+        let export = started.elapsed();
+        assert_eq!(header.state_root, driver.state_root().expect("root").root);
+        let started = Instant::now();
+        let checkpoint = Checkpoint::parse(&bytes).expect("parse checkpoint");
+        let parse = started.elapsed();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (db, fresh) =
+            TxDB::try_open(Some(&dir.path().join("db")), DatabaseConfig::default()).expect("open");
+        assert!(fresh);
+        let started = Instant::now();
+        let root = db
+            .import_checkpoint(&checkpoint)
+            .expect("import checkpoint");
+        let import = started.elapsed();
+        Restored {
+            bytes,
+            db,
+            root,
+            export,
+            parse,
+            import,
+            _dir: dir,
+        }
+    }
+
+    /// Commands touching every kind of state the minimal world has: numbered, UUID-kind and
+    /// anonymous creates, recycles, moves (`last_move`), properties of several types, verbs.
+    fn workload(height: u64) -> Vec<BlockInput> {
+        let wizard = Obj::mk_id(3);
+        vec![
+            eval(
+                wizard,
+                "r = {}; for i in [1..6] o = create(#1, player, i % 3); r = {@r, o}; \
+                 if (i % 3 == 0) move(o, #2); endif endfor return r;",
+            ),
+            eval(
+                wizard,
+                &format!(
+                    "add_property(#0, \"ck{height}\", {{{height}, 1.5, \"s\", ['k -> {{#1}}]}}, \
+                     {{player, \"rw\"}}); return 1;"
+                ),
+            ),
+            eval(
+                wizard,
+                &format!(
+                    "x = create(#1); recycle(x); add_verb(#0, {{player, \"rxd\", \"v{height}\"}}, \
+                     {{\"this\", \"none\", \"this\"}}); set_verb_code(#0, \"v{height}\", \
+                     {{\"return {height} + 1;\"}}); return #0:v{height}();"
+                ),
+            ),
+        ]
+    }
+
+    /// A world restored from a checkpoint is the same world: same root, the same file when
+    /// exported again, and the same roots as the original over further blocks.
+    #[test]
+    fn a_restored_world_executes_like_the_original() {
+        let _guard: MutexGuard<'static, ()> = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        deterministic::disable();
+        deterministic::configure(&DeterministicMode::on());
+        let features = FeaturesConfig {
+            use_uuobjids: true,
+            anonymous_objects: true,
+            ..FeaturesConfig::default()
+        };
+        let (db, _) = TxDB::try_open(None, DatabaseConfig::default()).expect("open");
+        load_textdump(&db);
+        let mut original = driver_on(&db, &features);
+        for height in 1..=10 {
+            let out = run(&mut original, height, &workload(height));
+            for o in &out.outcomes {
+                assert!(matches!(o.result, Some(Ok(_))), "{:?}", o.result);
+            }
+        }
+        let restored = export_and_restore(&original, 10);
+        assert_eq!(restored.root, original.state_root().expect("root"));
+        let mut copy = driver_on(&restored.db, &features);
+        let again = export_and_restore(&copy, 10);
+        assert!(again.bytes == restored.bytes, "re-export differs");
+        for height in 11..=15 {
+            let a = run(&mut original, height, &workload(height));
+            let b = run(&mut copy, height, &workload(height));
+            assert_eq!(root(&a), root(&b), "height {height}");
+            let results = |o: &BlockOutput| {
+                o.outcomes
+                    .iter()
+                    .map(|x| format!("{:?}", x.result))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(results(&a), results(&b), "height {height}");
+        }
+        copy.shutdown().ok();
+        original.shutdown().ok();
+        deterministic::disable();
+    }
+
+    /// A checkpoint with one flipped byte, or with another root in its header, is refused before
+    /// anything is written; a restore into a database that is not empty is refused.
+    #[test]
+    fn corrupted_checkpoints_are_refused() {
+        let _guard: MutexGuard<'static, ()> = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        deterministic::disable();
+        deterministic::configure(&DeterministicMode::on());
+        let (db, _) = TxDB::try_open(None, DatabaseConfig::default()).expect("open");
+        load_textdump(&db);
+        let mut driver = driver_on(&db, &FeaturesConfig::default());
+        run(&mut driver, 1, &[eval(Obj::mk_id(3), "return create(#1);")]);
+        let (header, bytes) = driver
+            .capture_checkpoint()
+            .unwrap()
+            .encode(1, [1; 32], "test")
+            .unwrap();
+        let mut flipped = bytes.clone();
+        let at = bytes.len() / 2;
+        flipped[at] ^= 0x40;
+        assert!(Checkpoint::parse(&flipped).is_err());
+        let body = &bytes[header.encode().len()..];
+        let mut other = header.clone();
+        other.state_root[31] ^= 1;
+        let mut forged = other.encode();
+        forged.extend_from_slice(body);
+        assert!(matches!(
+            Checkpoint::parse(&forged),
+            Err(CheckpointError::RootMismatch { .. })
+        ));
+        assert!(matches!(
+            db.import_checkpoint(&Checkpoint::parse(&bytes).unwrap()),
+            Err(CheckpointError::NotEmpty)
+        ));
+        driver.shutdown().ok();
+        deterministic::disable();
+    }
+
+    /// S1-5 acceptance: export -> import -> root equality on the stripped core after 10,000
+    /// commands from the create-heavy harness log (`tools/replay/commands-create.log`, S0-12),
+    /// with a genesis wallet binding (admission state). Run (release):
+    /// `RW_CHECKPOINT_CORE=.../core RW_CHECKPOINT_LOG=.../commands-create.log cargo test
+    /// --profile release-fast -p moor-kernel --test deterministic-suite
+    /// checkpoint::stripped_core_10000_commands -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "needs RW_CHECKPOINT_CORE and RW_CHECKPOINT_LOG; prints measurements"]
+    fn stripped_core_10000_commands() {
+        let (Ok(core), Ok(log)) = (
+            std::env::var("RW_CHECKPOINT_CORE"),
+            std::env::var("RW_CHECKPOINT_LOG"),
+        ) else {
+            eprintln!("RW_CHECKPOINT_CORE / RW_CHECKPOINT_LOG unset; skipped");
+            return;
+        };
+        let total: usize = std::env::var("RW_CHECKPOINT_COMMANDS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10_000);
+        let per_block = 100;
+        let _guard: MutexGuard<'static, ()> = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        deterministic::disable();
+        deterministic::configure(&DeterministicMode::on());
+        let features = core_features();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (db, _) =
+            TxDB::try_open(Some(&dir.path().join("db")), DatabaseConfig::default()).expect("open");
+        {
+            let mut loader = db.loader_client().unwrap();
+            moor_objdef::ObjectDefinitionLoader::new(loader.as_mut())
+                .load_objdef_directory(
+                    features.compile_options(),
+                    Path::new(&core),
+                    Default::default(),
+                )
+                .expect("load core");
+            loader.commit().unwrap();
+        }
+        let wizard = Obj::mk_id(2);
+        let scheduler = Scheduler::new(
+            semver::Version::new(0, 1, 0),
+            Box::new(db.clone()),
+            Box::new(NoopTasksDb {}),
+            Arc::new(Config {
+                deterministic: DeterministicMode::on(),
+                features: Arc::new(features.clone()),
+                ..Config::default()
+            }),
+            Arc::new(NoopSystemControl::default()),
+            None,
+            None,
+        );
+        scheduler
+            .assign_wallet(wizard, moor_common::envelope::Address([0xab; 20]))
+            .expect("genesis wallet");
+        let mut driver = scheduler
+            .start_block_driver(Arc::new(Factory))
+            .expect("start block driver");
+        driver.set_state_root_at_end_block(false);
+        // The harness core's #6 (a thing) and #2 (a room) are the stripped core's $thing and
+        // $first_room; every line runs as the stripped core's wizard.
+        let lines: Vec<BlockInput> = std::fs::read_to_string(&log)
+            .expect("read log")
+            .lines()
+            .filter(|l| l.starts_with("#3 ") || l.starts_with("#4 "))
+            .filter_map(|l| l.split_once(' ').map(|(_, rest)| rest.to_string()))
+            .map(|line| match line.strip_prefix(';') {
+                Some(code) => eval(
+                    wizard,
+                    &code.replace("#6", "$thing").replace("#2", "$first_room"),
+                ),
+                None => BlockInput::Command {
+                    player: wizard,
+                    command: line,
+                },
+            })
+            .collect();
+        assert!(!lines.is_empty(), "no commands in {log}");
+        let started = Instant::now();
+        let mut height = 0;
+        let mut ok = 0usize;
+        let mut sent = 0usize;
+        while sent < total {
+            height += 1;
+            let n = per_block.min(total - sent);
+            let inputs: Vec<BlockInput> = (sent..sent + n)
+                .map(|i| lines[i % lines.len()].clone())
+                .collect();
+            let out = run(&mut driver, height, &inputs);
+            ok += out
+                .outcomes
+                .iter()
+                .filter(|o| matches!(o.result, Some(Ok(_))))
+                .count();
+            sent += n;
+        }
+        let execute = started.elapsed();
+        let started = Instant::now();
+        let original = driver.state_root().expect("root");
+        let root_time = started.elapsed();
+        let restored = export_and_restore(&driver, height);
+        assert_eq!(restored.root, original, "restored root");
+        let mut copy = driver_on(&restored.db, &features);
+        let again = export_and_restore(&copy, height);
+        assert!(again.bytes == restored.bytes, "re-export differs");
+        // One more block on both.
+        driver.set_state_root_at_end_block(true);
+        copy.set_state_root_at_end_block(true);
+        let next: Vec<BlockInput> = lines.iter().take(per_block).cloned().collect();
+        let a = run(&mut driver, height + 1, &next);
+        let b = run(&mut copy, height + 1, &next);
+        assert_eq!(root(&a), root(&b), "after one more block");
+        let entries: u64 = original.relations.iter().map(|r| r.entries).sum();
+        println!(
+            "CHECKPOINT commands={sent} ok={ok} blocks={height} execute={:.1}s root={:?} \
+             entries={entries} bytes={} export={:?} parse={:?} import={:?} root={}",
+            execute.as_secs_f64(),
+            root_time,
+            restored.bytes.len(),
+            restored.export,
+            restored.parse,
+            restored.import,
+            original.root_hex()
+        );
+        for r in &original.relations {
+            println!("  {:<26} {:>8} entries", r.name, r.entries);
+        }
+        assert_eq!(original.relations.len(), RELATIONS.len());
+        copy.shutdown().ok();
+        driver.shutdown().ok();
+        deterministic::disable();
     }
 }
