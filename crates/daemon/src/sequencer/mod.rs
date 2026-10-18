@@ -30,6 +30,10 @@
 //!   unsigned block and the signing-guard record (both fsynced) before the signature. On start
 //!   the daemon has already recovered: sealed blocks the sink lacks are handed to the DA thread,
 //!   and the tip's seal notice is sent again.
+//! - **Checkpoints (S1-5, decision 7).** The kernel sequencer writes a checkpoint after every
+//!   `checkpoint_every`-th seal into `<sequencer-state>/checkpoints` (newest K kept); at
+//!   `checkpoint_publish_every` heights the DA thread publishes it to the sink once the block at
+//!   its height is published.
 //! - **Log stalled.** While the DA lag halt holds, [`SequencerHandle::log_stalled`] is true and
 //!   every connected client gets a system message when the log stalls and when it resumes.
 
@@ -51,7 +55,7 @@ use moor_block::{ChainTip, CommandEntry, DaSink, FileSink, SealedBlock, Segment}
 use moor_common::tasks::Session;
 use moor_kernel::tasks::{
     envelope_admission::OnAdmitted,
-    sequencer::{InputReceipt, SealNotice, Sequencer},
+    sequencer::{InputReceipt, SealNotice, Sequencer, WrittenCheckpoint},
     sequencer_recovery::FsyncLog,
 };
 use tracing::{debug, error, info, warn};
@@ -74,6 +78,13 @@ pub enum LogStatus {
     Stalled { sealed: u64, published: u64 },
     /// Publication caught up; blocks open again.
     Resumed { sealed: u64, published: u64 },
+}
+
+/// What the block thread hands the DA thread.
+enum DaItem {
+    Block(Box<SealedBlock>),
+    /// A checkpoint due for publication, after its block.
+    Checkpoint(WrittenCheckpoint),
 }
 
 /// The reply to one queued input.
@@ -219,7 +230,7 @@ pub fn start(parts: SequencerParts) -> std::io::Result<(SequencerHandle, JoinHan
         status: status.clone(),
         stop: stop.clone(),
     };
-    let (blocks, da_queue) = flume::unbounded::<SealedBlock>();
+    let (blocks, da_queue) = flume::unbounded::<DaItem>();
     let (segments, segment_reports) = flume::unbounded::<(u64, u64)>();
     let da_status = status.clone();
     let segment_blocks = parts
@@ -291,7 +302,7 @@ struct BlockLoop {
     carry: VecDeque<QueuedInput>,
     status: Arc<SequencerStatus>,
     stop: Arc<AtomicBool>,
-    blocks: Option<Sender<SealedBlock>>,
+    blocks: Option<Sender<DaItem>>,
     segment_reports: Receiver<(u64, u64)>,
     notify: Box<dyn Fn(SealNotice) + Send>,
     log_status: Box<dyn Fn(LogStatus) + Send>,
@@ -571,89 +582,138 @@ impl BlockLoop {
         self.metrics
             .record_da_lag(notice.height.saturating_sub(published));
         self.metrics.maybe_report(notice.height);
+        let checkpoint = sealed.checkpoint;
         if let Some(blocks) = &self.blocks
-            && blocks.send(sealed.block).is_err()
+            && blocks.send(DaItem::Block(Box::new(sealed.block))).is_err()
         {
             error!("the DA thread has gone; the sequencer halts");
             return false;
         }
+        if let Some(cp) = checkpoint {
+            info!(
+                height = cp.height,
+                bytes = cp.bytes,
+                ms = cp.time.as_secs_f64() * 1000.0,
+                publish = cp.publish,
+                path = %cp.path.display(),
+                "checkpoint written"
+            );
+            if cp.publish
+                && let Some(blocks) = &self.blocks
+            {
+                let _ = blocks.send(DaItem::Checkpoint(cp));
+            }
+        }
         true
     }
+}
+
+/// Publish the checkpoints whose blocks are published; keep the rest waiting.
+fn publish_checkpoints(sink: &mut FileSink, published: u64, waiting: &mut Vec<WrittenCheckpoint>) {
+    waiting.retain(|cp| {
+        if cp.height > published {
+            return true;
+        }
+        let result = std::fs::read(&cp.path)
+            .map_err(|e| e.to_string())
+            .and_then(|bytes| {
+                sink.publish_checkpoint(cp.height, &cp.state_root, &bytes)
+                    .map_err(|e| e.to_string())
+            });
+        match result {
+            Ok(Some(receipt)) => info!(
+                height = cp.height,
+                bytes = receipt.bytes,
+                location = %receipt.location,
+                "checkpoint published"
+            ),
+            Ok(None) => {}
+            Err(e) => warn!(height = cp.height, error = %e, "checkpoint not published"),
+        }
+        false
+    });
 }
 
 fn da_loop(
     mut sink: FileSink,
     mut prev: ChainTip,
     mut pending: Vec<SealedBlock>,
-    blocks: Receiver<SealedBlock>,
+    blocks: Receiver<DaItem>,
     segment_blocks: usize,
     status: Arc<SequencerStatus>,
     reports: Sender<(u64, u64)>,
 ) {
-    let mut publish = |pending: &mut Vec<SealedBlock>, prev: &mut ChainTip| -> bool {
-        if pending.is_empty() {
-            return true;
-        }
-        let segment = match Segment::from_sealed(*prev, pending, true) {
-            Ok(segment) => segment,
-            Err(e) => {
-                error!(error = %e, "could not build a segment");
-                return false;
+    let publish =
+        |sink: &mut FileSink, pending: &mut Vec<SealedBlock>, prev: &mut ChainTip| -> bool {
+            if pending.is_empty() {
+                return true;
+            }
+            let segment = match Segment::from_sealed(*prev, pending, true) {
+                Ok(segment) => segment,
+                Err(e) => {
+                    error!(error = %e, "could not build a segment");
+                    return false;
+                }
+            };
+            match sink.publish(&segment) {
+                Ok(receipt) => {
+                    *prev = segment.tip();
+                    status.published.store(prev.height, Ordering::Release);
+                    let _ = reports.send((pending.len() as u64, receipt.bytes));
+                    debug!(
+                        first = receipt.first_height,
+                        tip = receipt.tip_height,
+                        bytes = receipt.bytes,
+                        location = %receipt.location,
+                        "segment published"
+                    );
+                    pending.clear();
+                    true
+                }
+                Err(e) => {
+                    error!(error = %e, "segment publication failed; will retry");
+                    false
+                }
             }
         };
-        match sink.publish(&segment) {
-            Ok(receipt) => {
-                *prev = segment.tip();
-                status.published.store(prev.height, Ordering::Release);
-                let _ = reports.send((pending.len() as u64, receipt.bytes));
-                debug!(
-                    first = receipt.first_height,
-                    tip = receipt.tip_height,
-                    bytes = receipt.bytes,
-                    location = %receipt.location,
-                    "segment published"
-                );
-                pending.clear();
-                true
-            }
-            Err(e) => {
-                error!(error = %e, "segment publication failed; will retry");
-                false
-            }
-        }
-    };
     // Sealed blocks a crash left unpublished go out first, in full segments.
     while pending.len() >= segment_blocks {
         let rest = pending.split_off(segment_blocks);
-        if !publish(&mut pending, &mut prev) {
+        if !publish(&mut sink, &mut pending, &mut prev) {
             pending.extend(rest);
             break;
         }
         pending = rest;
     }
+    let mut checkpoints: Vec<WrittenCheckpoint> = Vec::new();
     loop {
         match blocks.recv_timeout(Duration::from_secs(1)) {
-            Ok(block) => {
-                pending.push(block);
+            Ok(DaItem::Block(block)) => {
+                pending.push(*block);
                 if pending.len() >= segment_blocks {
-                    publish(&mut pending, &mut prev);
+                    publish(&mut sink, &mut pending, &mut prev);
                 }
             }
+            Ok(DaItem::Checkpoint(cp)) => checkpoints.push(cp),
             Err(RecvTimeoutError::Timeout) => {
                 // A failed publication is retried here.
                 if pending.len() >= segment_blocks {
-                    publish(&mut pending, &mut prev);
+                    publish(&mut sink, &mut pending, &mut prev);
                 }
             }
             Err(RecvTimeoutError::Disconnected) => break,
         }
+        if !checkpoints.is_empty() {
+            publish_checkpoints(&mut sink, prev.height, &mut checkpoints);
+        }
     }
     for attempt in 0..3 {
-        if publish(&mut pending, &mut prev) {
+        if publish(&mut sink, &mut pending, &mut prev) {
             break;
         }
         warn!(attempt, "retrying the final segment");
         std::thread::sleep(Duration::from_millis(200));
     }
+    publish_checkpoints(&mut sink, prev.height, &mut checkpoints);
     info!(published = prev.height, "sequencer publication flushed");
 }

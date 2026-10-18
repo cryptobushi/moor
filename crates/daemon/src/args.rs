@@ -266,6 +266,29 @@ pub struct Args {
 
     #[arg(
         long,
+        value_name = "N",
+        help = "Sequencer mode: write a checkpoint after every N-th sealed block (default 3600; \
+                0 = none). Recovery restores the newest one instead of rebuilding at genesis"
+    )]
+    pub sequencer_checkpoint_every: Option<u64>,
+
+    #[arg(
+        long,
+        value_name = "K",
+        help = "Sequencer mode: checkpoints kept in <sequencer-state>/checkpoints (default 24)"
+    )]
+    pub sequencer_checkpoint_keep: Option<usize>,
+
+    #[arg(
+        long,
+        value_name = "N",
+        help = "Sequencer mode: publish the checkpoint to the sink every N blocks (default 86400, \
+                daily; 0 = never)"
+    )]
+    pub sequencer_checkpoint_publish_every: Option<u64>,
+
+    #[arg(
+        long,
         value_name = "OBJ",
         help = "Sequencer mode with --dev-identity: the player object number the development \
                 wallet is bound to at genesis; the daemon then signs that player's password-login \
@@ -522,6 +545,15 @@ impl Args {
         }
         if let Some(n) = self.sequencer_max_da_lag {
             config.sequencer.max_da_lag = n;
+        }
+        if let Some(n) = self.sequencer_checkpoint_every {
+            config.sequencer.checkpoint_every = n;
+        }
+        if let Some(n) = self.sequencer_checkpoint_keep {
+            config.sequencer.checkpoint_keep = n;
+        }
+        if let Some(n) = self.sequencer_checkpoint_publish_every {
+            config.sequencer.checkpoint_publish_every = n;
         }
         if let Some(player) = self.dev_player {
             config.sequencer.dev_player = Some(player);

@@ -66,6 +66,14 @@ pub struct SequencerConfig {
     pub max_da_lag: u64,
     /// Development identity only: the player the `--dev-identity` wallet is bound to at genesis.
     pub dev_player: Option<i32>,
+    /// Write a checkpoint after every seal at a height divisible by this (ADR 0006 decision 7:
+    /// 3,600); 0 disables checkpoints. Kept in `<state_dir>/checkpoints`.
+    pub checkpoint_every: u64,
+    /// Checkpoints kept locally (default 24).
+    pub checkpoint_keep: usize,
+    /// Publish the checkpoint to the sink at heights divisible by this (default 86,400, daily);
+    /// 0 never publishes.
+    pub checkpoint_publish_every: u64,
 }
 
 impl Default for SequencerConfig {
@@ -79,6 +87,9 @@ impl Default for SequencerConfig {
             segment_blocks: 10,
             max_da_lag: 300,
             dev_player: None,
+            checkpoint_every: 3_600,
+            checkpoint_keep: 24,
+            checkpoint_publish_every: 86_400,
         }
     }
 }

@@ -540,8 +540,9 @@ fn sequencer_state_dir(config: &Config, data_dir: &Path) -> PathBuf {
 /// Sequencer recovery step 1 (ADR 0006 decision 4), before anything runs on the database: open
 /// the local block store and keep the database only if its state root is a sealed block's (or
 /// the stored unsigned block's). Otherwise the database is moved aside to `<db>.discarded` and
-/// reopened empty, so the genesis import runs again; the sealed blocks are re-executed on it.
-/// Rebuilding from a verified checkpoint replaces genesis once checkpoint import exists (S1-5).
+/// reopened empty, and the newest usable checkpoint in `<sequencer-state>/checkpoints` (S1-5) is
+/// restored into it; only when there is none does the genesis import run again. The sealed
+/// blocks after the restored height are re-executed on it by `resume`.
 fn prepare_sequencer_database(
     config: &Config,
     data_dir: &Path,
@@ -554,27 +555,57 @@ fn prepare_sequencer_database(
     let state_dir = sequencer_state_dir(config, data_dir);
     let store = moor_block::durable::BlockStore::open(state_dir.join("blocks"))
         .map_err(|e| eyre!("opening the sequencer block store: {e}"))?;
-    if fresh || store.chain().is_none() {
+    if store.chain().is_none() {
         return Ok((database, fresh, store));
     }
-    let root = moor_db::Database::state_root(&database)
-        .map_err(|e| eyre!("state root of the database: {e}"))?
-        .root;
-    if database_resumable(&store, &root) {
-        info!(
+    let database = if fresh {
+        database
+    } else {
+        let root = moor_db::Database::state_root(&database)
+            .map_err(|e| eyre!("state root of the database: {e}"))?
+            .root;
+        if database_resumable(&store, &root) {
+            info!(
+                root = %moor_block::hex(&root),
+                sealed = store.sealed_height(),
+                "sequencer recovery: the database's state root is a sealed block's; kept"
+            );
+            return Ok((database, false, store));
+        }
+        warn!(
             root = %moor_block::hex(&root),
             sealed = store.sealed_height(),
-            "sequencer recovery: the database's state root is a sealed block's; kept"
+            "sequencer recovery: the database's state root is no sealed block's (a crash \
+             mid-block); rebuilding it"
         );
-        return Ok((database, false, store));
+        drop(database);
+        discard_database(config, db_path)?
+    };
+    let started = std::time::Instant::now();
+    match restore_checkpoint(&state_dir, &store, &database) {
+        Ok(Some(height)) => {
+            info!(
+                height,
+                sealed = store.sealed_height(),
+                ms = started.elapsed().as_millis() as u64,
+                "sequencer recovery: database restored from the checkpoint at height {height}"
+            );
+            Ok((database, false, store))
+        }
+        Ok(None) => {
+            info!("sequencer recovery: no usable checkpoint; rebuilding from genesis");
+            Ok((database, true, store))
+        }
+        Err(e) => {
+            warn!(error = %e, "sequencer recovery: checkpoint restore failed; rebuilding from genesis");
+            drop(database);
+            Ok((discard_database(config, db_path)?, true, store))
+        }
     }
-    warn!(
-        root = %moor_block::hex(&root),
-        sealed = store.sealed_height(),
-        "sequencer recovery: the database's state root is no sealed block's (a crash mid-block); \
-         rebuilding from genesis"
-    );
-    drop(database);
+}
+
+/// Move the database aside to `<db>.discarded` and open an empty one in its place.
+fn discard_database(config: &Config, db_path: &Path) -> Result<TxDB, Report> {
     let mut discarded = db_path.as_os_str().to_owned();
     discarded.push(".discarded");
     let discarded = PathBuf::from(discarded);
@@ -589,7 +620,29 @@ fn prepare_sequencer_database(
     if !fresh {
         bail!("the database at {} did not reopen empty", db_path.display());
     }
-    Ok((database, true, store))
+    Ok(database)
+}
+
+/// Restore the newest usable checkpoint (it verifies, and the block store holds its height with
+/// its root and header hash) into the empty `database`. `None` when there is none.
+fn restore_checkpoint(
+    state_dir: &Path,
+    store: &moor_block::durable::BlockStore,
+    database: &TxDB,
+) -> Result<Option<u64>, Report> {
+    let dir = moor_db::state_root::checkpoint::CheckpointDir::open(state_dir.join("checkpoints"))
+        .map_err(|e| eyre!("opening the checkpoint directory: {e}"))?;
+    let Some(stored) = moor_kernel::tasks::sequencer_recovery::usable_checkpoint(&dir, store)
+    else {
+        return Ok(None);
+    };
+    let checkpoint = stored
+        .checkpoint()
+        .map_err(|e| eyre!("checkpoint {}: {e}", stored.path.display()))?;
+    database
+        .import_checkpoint(&checkpoint)
+        .map_err(|e| eyre!("restoring {}: {e}", stored.path.display()))?;
+    Ok(Some(stored.header.height))
 }
 
 /// Sequencer mode (RuneWorld ADR 0006): take the scheduler under a block driver, recover the
@@ -770,6 +823,21 @@ fn start_sequencer(
         ms = started.elapsed().as_millis() as u64,
         "sequencer recovered"
     );
+    let mut sequencer = sequencer;
+    if config.sequencer.checkpoint_every > 0 {
+        let dir =
+            moor_db::state_root::checkpoint::CheckpointDir::open(state_dir.join("checkpoints"))
+                .map_err(|e| eyre!("opening the checkpoint directory: {e}"))?;
+        sequencer.set_checkpoints(Some(moor_kernel::tasks::sequencer::CheckpointPolicy {
+            every: config.sequencer.checkpoint_every,
+            keep: config.sequencer.checkpoint_keep,
+            publish_every: config.sequencer.checkpoint_publish_every,
+            ..moor_kernel::tasks::sequencer::CheckpointPolicy::new(
+                dir,
+                moor_common::build::commit(),
+            )
+        }));
+    }
     if let Some(resealed) = recovery.resealed {
         pending.push(resealed.block);
     }
