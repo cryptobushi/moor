@@ -505,6 +505,11 @@ mod executor {
             self.driver.as_mut().expect("driver")
         }
 
+        /// Hand the driver to a sequencer; the world keeps the process lock.
+        pub(super) fn take_driver(&mut self) -> BlockDriver {
+            self.driver.take().expect("driver")
+        }
+
         pub(super) fn block(&mut self, height: u64, evals: &[&str]) -> BlockOutput {
             let inputs = evals
                 .iter()
@@ -867,9 +872,19 @@ mod executor {
     // submitted concurrently to the threaded scheduler commit in a timing-dependent order.
 
     /// Records committed `notify` texts in commit order across all forks.
-    struct OrderSession {
+    pub(super) struct OrderSession {
         order: Arc<StdMutex<Vec<String>>>,
         buf: StdMutex<Vec<String>>,
+    }
+
+    impl OrderSession {
+        /// A session appending committed `notify` texts (as literals) to `order`.
+        pub(super) fn new(order: Arc<StdMutex<Vec<String>>>) -> Self {
+            Self {
+                order,
+                buf: StdMutex::new(vec![]),
+            }
+        }
     }
 
     impl Session for OrderSession {
@@ -1345,7 +1360,7 @@ mod admission {
 
     /// Hooks a core provides for the signed world: the creation hook, `user_created`,
     /// `user_connected`, and a parent for new players with `ping`, `boom` and `disfunc`.
-    const GENESIS: &str = r##"
+    pub(super) const GENESIS: &str = r##"
         wp = create(#-1);
         add_property(#0, "wallet_parent", wp, {player, "r"});
         add_property(#0, "booms", 0, {player, "rw"});
@@ -1364,15 +1379,20 @@ mod admission {
         return wp;
     "##;
 
-    fn wallet(n: u8) -> WalletSigner {
+    pub(super) fn wallet(n: u8) -> WalletSigner {
         WalletSigner::from_secret([n; 32]).expect("valid secret")
     }
 
-    fn key(n: u8) -> SessionSigner {
+    pub(super) fn key(n: u8) -> SessionSigner {
         SessionSigner::from_seed([n; 32])
     }
 
-    fn delegation(session: &SessionSigner, nonce: u64, create: bool, scope: u32) -> Delegation {
+    pub(super) fn delegation(
+        session: &SessionSigner,
+        nonce: u64,
+        create: bool,
+        scope: u32,
+    ) -> Delegation {
         Delegation {
             session_key: session.public_key(),
             box_key: [0xbb; 32],
@@ -1383,11 +1403,17 @@ mod admission {
         }
     }
 
-    fn delegate(w: &WalletSigner, s: &SessionSigner, d: Delegation) -> Envelope {
+    pub(super) fn delegate(w: &WalletSigner, s: &SessionSigner, d: Delegation) -> Envelope {
         w.delegate(&DOMAIN, s, d, 1_000).expect("sign delegation")
     }
 
-    fn command(s: &SessionSigner, player: Obj, session: u32, nonce: u32, text: &str) -> Envelope {
+    pub(super) fn command(
+        s: &SessionSigner,
+        player: Obj,
+        session: u32,
+        nonce: u32,
+        text: &str,
+    ) -> Envelope {
         s.envelope(
             &DOMAIN,
             player.as_u64(),
@@ -2919,5 +2945,470 @@ mod state_root {
         for (i, run) in runs.iter().enumerate() {
             assert_eq!(run, &runs[0], "process {i} differs");
         }
+    }
+}
+
+// --- Sequencer block loop (S1-1) -------------------------------------------------------------
+
+/// S1-1: the sequencer's block loop over the block driver (ADR 0006 decisions 1-2): context
+/// computation, limits, sealing into `moor-block` blocks, publication and replay.
+mod sequencer {
+    use std::{
+        path::Path,
+        sync::{Arc, Mutex as StdMutex},
+        time::{Duration, Instant},
+    };
+
+    use moor_block::{
+        Block, ChainTip, CommandEntry, DaSink, EMPTY_ROOT, EventPolicy, FileSink, SealedBlock,
+        Segment, SequencerInput, SequencerInputKind, SequencerKey, seed_for,
+    };
+    use moor_common::{
+        envelope::{Envelope, scope},
+        tasks::{NoopClientSession, Session},
+    };
+    use moor_kernel::tasks::{
+        block_events,
+        envelope_admission::Admitted,
+        sequencer::{
+            NoHooks, ReplayMismatch, Sequencer, SequencerError, SequencerParams, replay_block,
+        },
+    };
+    use moor_var::Obj;
+
+    use super::admission::{GENESIS, command, delegate, delegation, key, wallet};
+    use super::executor::{OrderSession, World};
+
+    /// Wall-clock seconds of the first block (before the test delegations expire).
+    const T0: u64 = 1_700_000_100;
+
+    fn sequencer_key() -> SequencerKey {
+        SequencerKey::from_secret(&[0x11; 32]).expect("valid secret")
+    }
+
+    fn noop() -> Arc<dyn Session> {
+        Arc::new(NoopClientSession::new())
+    }
+
+    /// A world with the signed-world hooks loaded before genesis, and a sequencer at genesis.
+    fn start(params: SequencerParams) -> (World, Sequencer) {
+        let mut world = World::start();
+        let out = world.block(0, &[GENESIS]);
+        assert!(
+            matches!(out.outcomes[0].result, Some(Ok(_))),
+            "genesis failed: {:?}",
+            out.outcomes[0].result
+        );
+        let driver = world.take_driver();
+        let sequencer = Sequencer::genesis(driver, sequencer_key(), params, Box::new(NoHooks))
+            .expect("genesis");
+        (world, sequencer)
+    }
+
+    fn envelope(env: &Envelope) -> CommandEntry {
+        CommandEntry::Envelope(env.encode())
+    }
+
+    fn disconnect(player: Obj) -> CommandEntry {
+        CommandEntry::Sequencer(SequencerInput {
+            kind: SequencerInputKind::Disconnected,
+            player: player.id().0,
+        })
+    }
+
+    /// Open a block at `wall`, run `entries`, seal it.
+    fn block(seq: &mut Sequencer, wall: u64, entries: Vec<CommandEntry>) -> SealedBlock {
+        seq.open_block(wall, Instant::now()).expect("open");
+        for entry in entries {
+            seq.submit(entry, noop(), None).expect("submit");
+        }
+        seq.seal().expect("seal").block
+    }
+
+    /// The fixed scenario: create a player, commands, an empty block, a disconnect and a
+    /// rejected envelope. Returns the sealed blocks and the created player.
+    fn scenario_with_player(seq: &mut Sequencer) -> (Vec<SealedBlock>, Obj) {
+        seq.open_block(T0, Instant::now()).expect("open");
+        let receipt = seq
+            .submit(
+                envelope(&delegate(
+                    &wallet(1),
+                    &key(1),
+                    delegation(&key(1), 1, true, scope::PLAY),
+                )),
+                noop(),
+                None,
+            )
+            .expect("submit");
+        let Some(Ok(Admitted::Delegated { player, .. })) = receipt.admission else {
+            panic!("create failed: {:?}", receipt.admission);
+        };
+        let mut sealed = vec![seq.seal().expect("seal").block];
+        sealed.push(block(
+            seq,
+            T0 + 1,
+            vec![
+                envelope(&command(&key(1), player, 1, 1, "ping a")),
+                envelope(&command(&key(1), player, 1, 2, "ping b")),
+            ],
+        ));
+        sealed.push(block(seq, T0 + 1, vec![]));
+        sealed.push(block(
+            seq,
+            T0 + 3,
+            vec![
+                disconnect(player),
+                envelope(&command(&key(9), player, 1, 3, "ping forged")),
+            ],
+        ));
+        (sealed, player)
+    }
+
+    fn scenario(seq: &mut Sequencer) -> Vec<SealedBlock> {
+        scenario_with_player(seq).0
+    }
+
+    fn publish(dir: &Path, genesis_root: &[u8; 32], blocks: &[SealedBlock], per: usize) {
+        let mut sink = FileSink::open(dir, EventPolicy::Require).expect("sink");
+        let mut prev = ChainTip::genesis(genesis_root);
+        for chunk in blocks.chunks(per) {
+            let segment = Segment::from_sealed(prev, chunk, true).expect("segment");
+            sink.publish(&segment).expect("publish");
+            prev = segment.tip();
+        }
+    }
+
+    /// Every file under the sink, name and bytes, in name order.
+    fn sink_files(dir: &Path) -> Vec<(String, Vec<u8>)> {
+        let mut files: Vec<_> = std::fs::read_dir(dir.join("segments"))
+            .expect("segments dir")
+            .map(|e| e.expect("entry").path())
+            .collect();
+        files.push(dir.join("index"));
+        files.sort();
+        files
+            .into_iter()
+            .map(|p| {
+                (
+                    p.file_name().unwrap().to_string_lossy().into_owned(),
+                    std::fs::read(&p).expect("read"),
+                )
+            })
+            .collect()
+    }
+
+    fn run_and_publish(dir: &Path) -> ([u8; 32], Vec<SealedBlock>) {
+        let (_world, mut seq) = start(SequencerParams::default());
+        let blocks = scenario(&mut seq);
+        let genesis = *seq.genesis_root();
+        publish(dir, &genesis, &blocks, 2);
+        seq.shutdown().expect("shutdown");
+        (genesis, blocks)
+    }
+
+    #[test]
+    fn two_sequencers_fed_the_same_inputs_publish_byte_identical_segments() {
+        let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        run_and_publish(a.path());
+        run_and_publish(b.path());
+        let (files_a, files_b) = (sink_files(a.path()), sink_files(b.path()));
+        assert!(files_a.len() >= 3, "{:?}", files_a.iter().map(|f| &f.0));
+        assert_eq!(files_a, files_b);
+    }
+
+    #[test]
+    fn the_scenario_admits_rejects_and_disconnects_as_logged() {
+        let (_world, mut seq) = start(SequencerParams::default());
+        let blocks = scenario(&mut seq);
+        // Block 4: the disconnect ran disfunc, the forged command was rejected (an event, no task).
+        let last = &blocks[3];
+        let kinds: Vec<u8> = last.events.entries().iter().map(|e| e.event[1]).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                block_events::event_tag::NARRATIVE as u8,
+                block_events::event_tag::REJECTED as u8
+            ]
+        );
+        seq.shutdown().unwrap();
+    }
+
+    #[test]
+    fn the_seed_follows_the_previous_state_root() {
+        let (_world, mut seq) = start(SequencerParams::default());
+        let genesis = *seq.genesis_root();
+        let blocks = scenario(&mut seq);
+        let mut expected = vec![seed_for(&genesis, 1)];
+        for (i, b) in blocks.iter().enumerate().take(blocks.len() - 1) {
+            expected.push(seed_for(&b.header.header.state_root, i as u64 + 2));
+        }
+        let seeds: Vec<_> = blocks.iter().map(|b| b.header.header.seed).collect();
+        assert_eq!(seeds, expected);
+        seq.shutdown().unwrap();
+    }
+
+    #[test]
+    fn the_open_block_context_carries_height_timestamp_and_seed() {
+        let (_world, mut seq) = start(SequencerParams::default());
+        let genesis = *seq.genesis_root();
+        let ctx = seq.open_block(T0, Instant::now()).unwrap();
+        assert_eq!(
+            (ctx.height, ctx.timestamp, ctx.seed),
+            (1, T0, seed_for(&genesis, 1))
+        );
+        seq.seal().unwrap();
+        seq.shutdown().unwrap();
+    }
+
+    #[test]
+    fn a_clock_slightly_behind_keeps_the_previous_timestamp() {
+        let (_world, mut seq) = start(SequencerParams::default());
+        block(&mut seq, T0 + 5, vec![]);
+        let ctx = seq.open_block(T0 + 4, Instant::now()).unwrap();
+        assert_eq!(ctx.timestamp, T0 + 5);
+        seq.seal().unwrap();
+        seq.shutdown().unwrap();
+    }
+
+    #[test]
+    fn a_clock_more_than_two_seconds_behind_is_refused() {
+        let (_world, mut seq) = start(SequencerParams::default());
+        block(&mut seq, T0 + 5, vec![]);
+        let refused = seq.open_block(T0 + 2, Instant::now());
+        assert!(
+            matches!(refused, Err(SequencerError::ClockBehind { .. })),
+            "{refused:?}"
+        );
+        seq.shutdown().unwrap();
+    }
+
+    #[test]
+    fn a_clock_jump_of_more_than_sixty_seconds_is_refused() {
+        let (_world, mut seq) = start(SequencerParams::default());
+        let opened = Instant::now();
+        seq.open_block(T0, opened).unwrap();
+        seq.seal().unwrap();
+        let refused = seq.open_block(T0 + 120, opened + Duration::from_secs(1));
+        assert!(
+            matches!(refused, Err(SequencerError::ClockJumped { .. })),
+            "{refused:?}"
+        );
+        seq.shutdown().unwrap();
+    }
+
+    #[test]
+    fn timestamps_never_decrease_across_blocks() {
+        let (_world, mut seq) = start(SequencerParams::default());
+        let walls = [T0, T0 + 2, T0 + 1, T0 + 1, T0 + 3];
+        let stamps: Vec<u64> = walls
+            .iter()
+            .map(|w| block(&mut seq, *w, vec![]).header.header.timestamp)
+            .collect();
+        assert_eq!(stamps, vec![T0, T0 + 2, T0 + 2, T0 + 2, T0 + 3]);
+        seq.shutdown().unwrap();
+    }
+
+    #[test]
+    fn an_input_over_the_count_limit_waits_for_the_next_block() {
+        let (_world, mut seq) = start(SequencerParams {
+            max_inputs: 2,
+            ..SequencerParams::default()
+        });
+        seq.open_block(T0, Instant::now()).unwrap();
+        for player in [10, 11] {
+            seq.submit(disconnect(Obj::mk_id(player)), noop(), None)
+                .unwrap();
+        }
+        let third = disconnect(Obj::mk_id(12));
+        let refused = seq.submit(third.clone(), noop(), None);
+        assert!(
+            matches!(refused, Err(SequencerError::BlockFull)),
+            "{refused:?}"
+        );
+        assert_eq!(seq.seal().unwrap().block.commands.len(), 2);
+        seq.open_block(T0 + 1, Instant::now()).unwrap();
+        let receipt = seq.submit(third, noop(), None).unwrap();
+        assert_eq!((receipt.height, receipt.command_index), (2, 1));
+        seq.seal().unwrap();
+        seq.shutdown().unwrap();
+    }
+
+    #[test]
+    fn an_input_over_the_byte_limit_does_not_fit() {
+        // One 80-byte envelope entry is 84 bytes encoded; two plus the array head exceed 160.
+        let (_world, mut seq) = start(SequencerParams {
+            max_batch_bytes: 160,
+            ..SequencerParams::default()
+        });
+        seq.open_block(T0, Instant::now()).unwrap();
+        let entry = envelope(&command(&key(1), Obj::mk_id(3), 1, 1, "go west"));
+        assert_eq!(entry.encode().len(), 84);
+        seq.submit(entry.clone(), noop(), None).unwrap();
+        assert!(!seq.fits(&entry));
+        seq.seal().unwrap();
+        seq.shutdown().unwrap();
+    }
+
+    #[test]
+    fn an_empty_block_has_empty_roots_and_the_previous_state_root() {
+        let (_world, mut seq) = start(SequencerParams::default());
+        let genesis = *seq.genesis_root();
+        let b = block(&mut seq, T0, vec![]);
+        let h = b.header.header;
+        assert_eq!(
+            (h.commands_root, h.events_root, h.state_root),
+            (EMPTY_ROOT, EMPTY_ROOT, genesis)
+        );
+        seq.shutdown().unwrap();
+    }
+
+    #[test]
+    fn events_are_tagged_with_their_inputs_command_index() {
+        let (_world, mut seq) = start(SequencerParams::default());
+        let blocks = scenario(&mut seq);
+        let tags: Vec<(u64, u64)> = blocks[1]
+            .events
+            .entries()
+            .iter()
+            .map(|e| (e.seq, e.command_index))
+            .collect();
+        assert_eq!(tags, vec![(0, 1), (1, 2)]);
+        seq.shutdown().unwrap();
+    }
+
+    #[test]
+    fn events_reach_the_session_before_the_seal() {
+        let (_world, mut seq) = start(SequencerParams::default());
+        let (_, player) = scenario_with_player(&mut seq);
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let session: Arc<dyn Session> = Arc::new(OrderSession::new(seen.clone()));
+        seq.open_block(T0 + 4, Instant::now()).unwrap();
+        let receipt = seq
+            .submit(
+                envelope(&command(&key(1), player, 1, 9, "ping soft")),
+                session,
+                None,
+            )
+            .unwrap();
+        let before_seal = seen.lock().unwrap().clone();
+        seq.seal().unwrap();
+        assert_eq!(
+            (before_seal, receipt.events, receipt.command_index),
+            (vec!["\"pong soft\"".to_string()], 1, 1)
+        );
+        seq.shutdown().unwrap();
+    }
+
+    #[test]
+    fn the_rejected_envelope_still_lands_in_the_command_batch() {
+        let (_world, mut seq) = start(SequencerParams::default());
+        let blocks = scenario(&mut seq);
+        assert_eq!(blocks[3].commands.len(), 2);
+        seq.shutdown().unwrap();
+    }
+
+    /// Replay published blocks on a fresh world from the same genesis.
+    fn replay(blocks: &[Block], events: &[moor_block::EventBatch]) -> Result<(), ReplayMismatch> {
+        let mut world = World::start();
+        let out = world.block(0, &[GENESIS]);
+        assert!(matches!(out.outcomes[0].result, Some(Ok(_))));
+        let mut driver = world.take_driver();
+        let genesis = driver.state_root().expect("root").root;
+        let mut prev = ChainTip::genesis(&genesis);
+        let result = blocks.iter().zip(events).try_for_each(|(block, batch)| {
+            replay_block(&mut driver, &prev, block, Some(batch))?;
+            prev = ChainTip::of(&block.header);
+            Ok(())
+        });
+        driver.shutdown().ok();
+        result
+    }
+
+    fn published(blocks: &[SealedBlock]) -> (Vec<Block>, Vec<moor_block::EventBatch>) {
+        (
+            blocks
+                .iter()
+                .map(|b| Block {
+                    header: b.header.header,
+                    commands: b.commands.clone(),
+                })
+                .collect(),
+            blocks.iter().map(|b| b.events.clone()).collect(),
+        )
+    }
+
+    #[test]
+    fn a_replay_from_genesis_matches_every_root() {
+        let (_world, mut seq) = start(SequencerParams::default());
+        let sealed = scenario(&mut seq);
+        seq.shutdown().unwrap();
+        drop(_world);
+        let (blocks, events) = published(&sealed);
+        assert_eq!(replay(&blocks, &events), Ok(()));
+    }
+
+    #[test]
+    fn a_replay_detects_a_falsified_state_root() {
+        let (_world, mut seq) = start(SequencerParams::default());
+        let sealed = scenario(&mut seq);
+        seq.shutdown().unwrap();
+        drop(_world);
+        let (mut blocks, events) = published(&sealed);
+        blocks[1].header.state_root[0] ^= 1;
+        assert_eq!(
+            replay(&blocks, &events),
+            Err(ReplayMismatch::StateRoot {
+                height: 2,
+                relation: None
+            })
+        );
+    }
+
+    #[test]
+    fn a_replay_names_the_first_differing_event() {
+        let (_world, mut seq) = start(SequencerParams::default());
+        let sealed = scenario(&mut seq);
+        seq.shutdown().unwrap();
+        drop(_world);
+        let (mut blocks, mut events) = published(&sealed);
+        // Claim a different second event in block 2 and an events_root to match the claim.
+        let mut entries = events[1].entries().to_vec();
+        entries[1].event[3] ^= 1;
+        events[1] = moor_block::EventBatch::new(entries).unwrap();
+        blocks[1].header.events_root = events[1].root();
+        assert_eq!(
+            replay(&blocks, &events),
+            Err(ReplayMismatch::EventsRoot {
+                height: 2,
+                seq: Some(1)
+            })
+        );
+    }
+
+    #[test]
+    fn the_delegation_input_creates_the_player_in_block_one() {
+        let (_world, mut seq) = start(SequencerParams::default());
+        seq.open_block(T0, Instant::now()).unwrap();
+        let receipt = seq
+            .submit(
+                envelope(&delegate(
+                    &wallet(1),
+                    &key(1),
+                    delegation(&key(1), 1, true, scope::PLAY),
+                )),
+                noop(),
+                None,
+            )
+            .unwrap();
+        assert!(
+            matches!(
+                receipt.admission,
+                Some(Ok(Admitted::Delegated { created: true, .. }))
+            ),
+            "{:?}",
+            receipt.admission
+        );
+        seq.seal().unwrap();
+        seq.shutdown().unwrap();
     }
 }
