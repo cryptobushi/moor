@@ -155,6 +155,24 @@ fn bf_connections(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
         )?;
     }
 
+    // The connection registry lives outside the world. In deterministic mode every player has
+    // exactly one logical connection, the player object itself, with no address, no idle time,
+    // no content-type preference (plain text) and no options; output sent to it reaches all of
+    // the player's real connections through the host. A replayer without hosts gets the same
+    // answer. With no argument (every connection) the answer is empty, as `connected_players()`.
+    if deterministic::is_enabled() {
+        return Ok(Ret(match player {
+            Some(player) => v_list(&[v_list(&[
+                v_obj(player),
+                v_str(""),
+                v_float(0.0),
+                v_list(&[]),
+                v_list(&[]),
+            ])]),
+            None => v_list(&[]),
+        }));
+    }
+
     let connection_details = match current_session().connection_details(player) {
         Ok(result) => result,
         Err(SessionError::NoConnectionForPlayer(_)) => {
@@ -217,6 +235,11 @@ fn bf_connections(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
 /// Usage: `obj connection()`
 /// Returns the connection object (negative ID) for the current task's session.
 fn bf_connection(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
+    // Deterministic mode: a task's connection is its player's logical connection, the player
+    // object itself (see `connections()`), whichever host submitted the input.
+    if deterministic::is_enabled() {
+        return Ok(Ret(v_obj(bf_args.player())));
+    }
     if !bf_args.args.is_empty() {
         return Err(ErrValue(
             E_ARGS.msg("connection() does not take any arguments"),
@@ -394,6 +417,11 @@ fn bf_output_delimiters(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
     // Permission check: can only query own delimiters unless wizard
     bf_args.require_controls_or_builtin_call_msg(&player, "Permission denied")?;
 
+    // Connection attributes are host state: deterministic mode sees no connection.
+    if deterministic::is_enabled() {
+        return Ok(Ret(v_list(&[v_str(""), v_str("")])));
+    }
+
     // Get the attributes from the connection registry
     let attributes_var = match current_session().connection_attributes(player) {
         Ok(attributes) => attributes,
@@ -557,6 +585,7 @@ fn bf_connection_options(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> 
 /// Returns the value of a specific connection option. Raises E_INVARG if not found.
 /// Argument must be a connection object (negative ID), not a player.
 fn bf_connection_option(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
+    reject_in_deterministic_mode("connection_option")?;
     if bf_args.args.len() != 2 {
         return Err(ErrValue(
             E_ARGS.msg("connection_option() requires exactly 2 arguments"),
