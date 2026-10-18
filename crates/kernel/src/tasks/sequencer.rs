@@ -30,6 +30,9 @@
 //! [`SequencerHooks`] are the journal and signing-guard hook points of decision 4 (S1-2): an
 //! input is offered to `before_input` before it runs, a header to `before_sign` before it is
 //! signed. [`replay_block`] re-executes a published block and checks its roots.
+//!
+//! With a [`CheckpointPolicy`] the sequencer also writes a checkpoint (ADR 0006 decision 7) after
+//! every `every`-th seal: the canonical state at that height, whose hash is its state root.
 
 use crate::tasks::{
     TaskId,
@@ -46,8 +49,10 @@ use moor_common::{
     deterministic::BlockContext,
     tasks::{NoopClientSession, SchedulerError, Session},
 };
+use moor_db::state_root::checkpoint::CheckpointDir;
 use moor_var::{Obj, Var};
 use std::{
+    path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -81,6 +86,58 @@ impl Default for SequencerParams {
     }
 }
 
+/// Blocks between checkpoints (ADR 0006 decision 7: one an hour at 1 s blocks).
+pub const DEFAULT_CHECKPOINT_EVERY: u64 = 3_600;
+/// Checkpoints kept locally (a day of hourly checkpoints).
+pub const DEFAULT_CHECKPOINT_KEEP: usize = 24;
+/// Blocks between published checkpoints (daily at 1 s blocks).
+pub const DEFAULT_CHECKPOINT_PUBLISH_EVERY: u64 = 86_400;
+
+/// When and where the sequencer writes checkpoints.
+#[derive(Clone, Debug)]
+pub struct CheckpointPolicy {
+    pub dir: CheckpointDir,
+    /// Write one after every seal at a height divisible by this (0 = never).
+    pub every: u64,
+    /// Keep the newest this many locally.
+    pub keep: usize,
+    /// Mark one for publication at heights divisible by this (0 = never).
+    pub publish_every: u64,
+    /// Recorded in the checkpoint header (informative).
+    pub fork_commit: String,
+}
+
+impl CheckpointPolicy {
+    /// ADR 0006's cadence in `dir`.
+    #[must_use]
+    pub fn new(dir: CheckpointDir, fork_commit: impl Into<String>) -> Self {
+        Self {
+            dir,
+            every: DEFAULT_CHECKPOINT_EVERY,
+            keep: DEFAULT_CHECKPOINT_KEEP,
+            publish_every: DEFAULT_CHECKPOINT_PUBLISH_EVERY,
+            fork_commit: fork_commit.into(),
+        }
+    }
+
+    fn due(&self, height: u64) -> bool {
+        self.every > 0 && height > 0 && height.is_multiple_of(self.every)
+    }
+}
+
+/// A checkpoint written after a seal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WrittenCheckpoint {
+    pub height: u64,
+    pub state_root: Hash,
+    pub path: PathBuf,
+    pub bytes: u64,
+    /// Due for publication (`publish_every`).
+    pub publish: bool,
+    /// Capture, encoding and the fsynced write.
+    pub time: Duration,
+}
+
 /// Why the sequencer refused or failed.
 #[derive(Debug, thiserror::Error)]
 pub enum SequencerError {
@@ -104,6 +161,8 @@ pub enum SequencerError {
     EventEncoding(String),
     #[error("{0} hook refused: {1}")]
     Hook(&'static str, String),
+    #[error("checkpoint: {0}")]
+    Checkpoint(String),
 }
 
 /// The journal and signing-guard hook points of ADR 0006 decision 4. All default to accepting.
@@ -196,6 +255,8 @@ pub struct Sealed {
     /// Tasks cancelled at the boundary, and transaction conflicts (always zero when serial).
     pub abandoned: usize,
     pub conflicts: u64,
+    /// The checkpoint written after this seal, if one was due.
+    pub checkpoint: Option<WrittenCheckpoint>,
 }
 
 struct OpenBlock {
@@ -279,6 +340,7 @@ pub struct Sequencer {
     open: Option<OpenBlock>,
     /// The previous opening: (wall second, monotonic instant), for jump detection.
     last_open: Option<(u64, Instant)>,
+    checkpoints: Option<CheckpointPolicy>,
 }
 
 impl Sequencer {
@@ -305,6 +367,84 @@ impl Sequencer {
             hooks,
             open: None,
             last_open: None,
+            checkpoints: None,
+        }
+    }
+
+    /// Write checkpoints after seals under `policy` (none by default).
+    pub fn set_checkpoints(&mut self, policy: Option<CheckpointPolicy>) {
+        self.checkpoints = policy;
+    }
+
+    #[must_use]
+    pub fn checkpoints(&self) -> Option<&CheckpointPolicy> {
+        self.checkpoints.as_ref()
+    }
+
+    /// Write a checkpoint of the state at the tip into `dir` now (between blocks only), and keep
+    /// the newest `keep` there.
+    pub fn write_checkpoint(
+        &self,
+        dir: &CheckpointDir,
+        keep: usize,
+        fork_commit: &str,
+    ) -> Result<WrittenCheckpoint, SequencerError> {
+        if self.open.is_some() {
+            return Err(SequencerError::AlreadyOpen);
+        }
+        let failed = |e: String| SequencerError::Checkpoint(e);
+        let started = Instant::now();
+        let capture = self
+            .driver
+            .capture_checkpoint()
+            .map_err(|e| failed(e.to_string()))?;
+        let header_hash = if self.tip.height == 0 {
+            [0; 32]
+        } else {
+            self.tip.hash
+        };
+        let (header, bytes) = capture
+            .encode(self.tip.height, header_hash, fork_commit)
+            .map_err(|e| failed(e.to_string()))?;
+        if header.state_root != self.tip.state_root {
+            return Err(failed(format!(
+                "the captured state has root {}, the tip {} has {}",
+                moor_block::hex(&header.state_root),
+                self.tip.height,
+                moor_block::hex(&self.tip.state_root)
+            )));
+        }
+        let path = dir
+            .write(&header, &bytes)
+            .map_err(|e| failed(e.to_string()))?;
+        dir.prune(keep.max(1)).map_err(|e| failed(e.to_string()))?;
+        Ok(WrittenCheckpoint {
+            height: header.height,
+            state_root: header.state_root,
+            path,
+            bytes: bytes.len() as u64,
+            publish: false,
+            time: started.elapsed(),
+        })
+    }
+
+    /// The checkpoint due after the seal that made the current tip, if any. A failure is logged
+    /// and skipped: checkpoints shorten recovery, they are not part of the chain.
+    fn checkpoint_after_seal(&self) -> Option<WrittenCheckpoint> {
+        let policy = self.checkpoints.as_ref()?;
+        let height = self.tip.height;
+        if !policy.due(height) {
+            return None;
+        }
+        match self.write_checkpoint(&policy.dir, policy.keep, &policy.fork_commit) {
+            Ok(written) => Some(WrittenCheckpoint {
+                publish: policy.publish_every > 0 && height.is_multiple_of(policy.publish_every),
+                ..written
+            }),
+            Err(e) => {
+                tracing::warn!(height, error = %e, "checkpoint not written");
+                None
+            }
         }
     }
 
@@ -564,6 +704,7 @@ impl Sequencer {
             header_hash: self.tip.hash,
             state_root: self.tip.state_root,
         };
+        let checkpoint = self.checkpoint_after_seal();
         Ok(Sealed {
             command_bytes: block.commands.encode().len(),
             event_bytes: block.events.encode().len(),
@@ -574,6 +715,7 @@ impl Sequencer {
             seal_time,
             abandoned: 0,
             conflicts: 0,
+            checkpoint,
         })
     }
 

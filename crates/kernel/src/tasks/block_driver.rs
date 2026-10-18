@@ -472,6 +472,14 @@ impl BlockDriver {
         self.scheduler.database.canonical_relation(name)
     }
 
+    /// Hold the committed state for a checkpoint (ADR 0006 decision 7). O(1); between blocks this
+    /// is the state after the last sealed block.
+    pub fn capture_checkpoint(
+        &self,
+    ) -> Result<moor_db::state_root::checkpoint::CheckpointCapture, WorldStateError> {
+        self.scheduler.database.capture_checkpoint()
+    }
+
     /// Start a block: install its context (time, seed; command index 0) and empty the batch.
     pub fn begin_block(&mut self, block: BlockContext) {
         deterministic::set_block(block);

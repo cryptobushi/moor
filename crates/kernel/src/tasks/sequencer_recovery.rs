@@ -24,8 +24,8 @@
 //! [`resume`] restarts a sequencer from that state. The caller first decides whether its database
 //! can be kept: [`moor_block::durable::BlockStore::height_with_root`] names the sealed height the
 //! database's state root belongs to; if none, the caller rebuilds the database from the newest
-//! verified checkpoint or genesis (only genesis exists until checkpoint import, S1-5) and calls
-//! [`resume`] with the rebuilt driver. [`resume`] then
+//! usable checkpoint ([`usable_checkpoint`], restored with `TxDB::import_checkpoint`), or at
+//! genesis when there is none, and calls [`resume`] with the rebuilt driver. [`resume`] then
 //!
 //! 1. halts if the signing guard records a height the store lacks (that block is recovered, never
 //!    re-made), or a header the store does not hold;
@@ -46,6 +46,7 @@ use moor_block::{
     durable::{Authorization, BlockStore, DurableError, Journal, JournalledBlock, SigningGuard},
 };
 use moor_common::deterministic::BlockContext;
+use moor_db::state_root::checkpoint::{CheckpointDir, StoredCheckpoint};
 
 use crate::tasks::{
     block_driver::BlockDriver,
@@ -271,6 +272,30 @@ pub struct Recovery {
 pub fn database_resumable(store: &BlockStore, root: &[u8; 32]) -> bool {
     store.height_with_root(root).is_some()
         || store.unsigned().is_some_and(|u| &u.state_root == root)
+}
+
+/// The newest checkpoint in `dir` that recovery may restore: it verifies (its relations hash to
+/// its header's root), and the block store holds a signed block at its height with that state
+/// root and header hash. Checkpoints that fail are logged and skipped.
+pub fn usable_checkpoint(dir: &CheckpointDir, store: &BlockStore) -> Option<StoredCheckpoint> {
+    let sealed = store.sealed_height();
+    let found = dir.newest_verified(
+        |h| {
+            h.height > 0
+                && h.height <= sealed
+                && store
+                    .header(h.height)
+                    .is_some_and(|b| b.state_root == h.state_root && b.hash() == h.header_hash)
+        },
+        |height, e| tracing::warn!(height, error = %e, "checkpoint skipped"),
+    );
+    match found {
+        Ok(found) => found,
+        Err(e) => {
+            tracing::warn!(dir = %dir.path().display(), error = %e, "checkpoints unreadable");
+            None
+        }
+    }
 }
 
 /// Re-execute stored blocks `from..=to` on `driver`, checking roots and events.
