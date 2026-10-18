@@ -2247,12 +2247,21 @@ mod state_root {
 
         /// As `start_with`, with the given language features (`use_uuobjids`, `anonymous_objects`).
         fn start_features(before_load: impl FnOnce(), features: moor_vm::FeaturesConfig) -> Self {
+            Self::start_in(None, before_load, features)
+        }
+
+        /// As `start_features`, with the database kept under `dir` when given.
+        fn start_in(
+            dir: Option<&Path>,
+            before_load: impl FnOnce(),
+            features: moor_vm::FeaturesConfig,
+        ) -> Self {
             let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
             deterministic::disable();
             let mode = DeterministicMode::on();
             deterministic::configure(&mode);
             before_load();
-            let (db, _) = TxDB::try_open(None, DatabaseConfig::default()).unwrap();
+            let (db, _) = TxDB::try_open(dir, DatabaseConfig::default()).unwrap();
             load_textdump(&db);
             let scheduler = Scheduler::new(
                 semver::Version::new(0, 1, 0),
@@ -2482,6 +2491,81 @@ mod state_root {
         let second = one_moved(&mut world, 2);
         assert_ne!(first.root, second.root);
         assert!(changed(&first, &second).contains(&"object_location"));
+    }
+
+    /// Issue #54. Properties holding the float edge values (`-0.0`, a subnormal, the extremes),
+    /// bare and nested in a list, a map and a flyweight, are sealed, the database is closed and
+    /// reopened, and the root and every canonical dump are unchanged. MOO has no way to make a
+    /// NaN or an infinity (each route raises `E_FLOAT` or `E_INVARG`), so the stored value is
+    /// the error code, not a float.
+    #[test]
+    fn float_edge_values_survive_a_restart_with_the_same_root_and_dump() {
+        let dir = tempfile::tempdir().unwrap();
+        let (root_before, dumps_before) = {
+            let mut world =
+                World::start_in(Some(dir.path()), || {}, moor_vm::FeaturesConfig::default());
+            world.block(&[
+                "add_property(#0, \"nz\", -0.0, {player, \"rw\"}); \
+                 add_property(#0, \"sub\", 5e-324, {player, \"rw\"}); \
+                 add_property(#0, \"nsub\", -5e-324, {player, \"rw\"}); \
+                 add_property(#0, \"extreme\", {1.7976931348623157e308, -1.7976931348623157e308, 2.2250738585072014e-308}, {player, \"rw\"}); \
+                 add_property(#0, \"in_list\", {-0.0, {-0.0, 5e-324}, 0.0 * -1.0}, {player, \"rw\"}); \
+                 add_property(#0, \"in_map\", [\"k\" -> -0.0, -0.0 -> {-0.0}, 5e-324 -> \"s\"], {player, \"rw\"}); \
+                 add_property(#0, \"in_fly\", <#1, .slot = -0.0, {-0.0, 5e-324}>, {player, \"rw\"}); \
+                 return 1;",
+            ]);
+            world.block(&[
+                "codes = {}; \
+                 try x = 10.0 ^ 400.0; codes = {@codes, x}; except e (ANY) codes = {@codes, e[1]}; endtry \
+                 try x = 1.0e308 * 10.0; codes = {@codes, x}; except e (ANY) codes = {@codes, e[1]}; endtry \
+                 try x = -1.0e308 * 10.0; codes = {@codes, x}; except e (ANY) codes = {@codes, e[1]}; endtry \
+                 try x = tofloat(\"inf\"); codes = {@codes, x}; except e (ANY) codes = {@codes, e[1]}; endtry \
+                 try x = tofloat(\"-infinity\"); codes = {@codes, x}; except e (ANY) codes = {@codes, e[1]}; endtry \
+                 try x = tofloat(\"nan\"); codes = {@codes, x}; except e (ANY) codes = {@codes, e[1]}; endtry \
+                 add_property(#0, \"nonfinite\", codes, {player, \"rw\"}); return codes;",
+            ]);
+            let codes = world.eval("return #0.nonfinite;");
+            assert!(
+                codes
+                    .as_list()
+                    .unwrap()
+                    .iter_ref()
+                    .all(|c| c.as_error().is_some()),
+                "a non-finite float got into a MOO value: {codes:?}"
+            );
+            let nz = world.eval("return {#0.nz, #0.in_list, tostr(-0.0), toliteral(-0.0), -0.0 == 0.0, 1.0 / 3.0 > 0.0};");
+            assert_eq!(
+                nz.as_list().unwrap().iter_ref().next().unwrap().as_float(),
+                Some(0.0)
+            );
+            let shown = world.eval("return {tostr(-0.0), toliteral(-0.0), -0.0 == 0.0};");
+            assert_eq!(
+                shown,
+                moor_var::v_list(&[
+                    moor_var::v_str("0.0"),
+                    moor_var::v_str("0.0"),
+                    moor_var::v_int(1)
+                ])
+            );
+            let root = world.driver().state_root().unwrap();
+            let dumps: Vec<_> = RELATIONS
+                .iter()
+                .map(|r| world.db.canonical_relation(r).unwrap().encode())
+                .collect();
+            world.db.wait_for_persistence().unwrap();
+            (root, dumps)
+        };
+        // The first world is dropped; reopen the same directory without loading anything.
+        let (db, fresh) = TxDB::try_open(Some(dir.path()), DatabaseConfig::default()).unwrap();
+        assert!(!fresh);
+        assert_eq!(db.state_root().unwrap(), root_before);
+        for (name, before) in RELATIONS.iter().zip(&dumps_before) {
+            assert_eq!(
+                &db.canonical_relation(name).unwrap().encode(),
+                before,
+                "{name}"
+            );
+        }
     }
 
     fn round_trip(v: &Var) {
