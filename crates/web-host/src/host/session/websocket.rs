@@ -19,7 +19,7 @@ use std::time::Duration;
 use tracing::{debug, error, trace};
 
 use super::{PendingTask, webrtc};
-use crate::host::actions::is_action_frame;
+use crate::host::{actions::is_action_frame, runeworld::is_envelope_frame};
 
 const TASK_TIMEOUT: Duration = Duration::from_secs(10);
 const HEARTBEAT_RESPONSE: u8 = 0x01;
@@ -76,6 +76,10 @@ pub async fn read_websocket_event(
                 if !data.is_empty() && data[0] == webrtc::SIGNALING_PREFIX =>
             {
                 return ReadEvent::WebRtcSignaling(data.to_vec());
+            }
+            Message::Binary(ref data) if is_envelope_frame(data) => {
+                // A signed envelope is a command, never a reply to an outstanding read().
+                return ReadEvent::Command(msg);
             }
             Message::Binary(ref data) if is_action_frame(data) => {
                 // An action is never a reply to an outstanding read().
@@ -140,6 +144,16 @@ mod tests {
         assert!(
             matches!(read_websocket_event(&mut messages, true, &mut pending).await, ReadEvent::InputReply(Message::Text(text)) if text == "the prompt answer")
         );
+    }
+
+    #[tokio::test]
+    async fn envelope_frames_are_not_prompt_replies() {
+        let envelope = Message::Binary(vec![0x05, 0x00, 0x01].into());
+        let mut messages = stream::iter(vec![Ok(envelope)]);
+        assert!(matches!(
+            read_websocket_event(&mut messages, true, &mut None).await,
+            ReadEvent::Command(Message::Binary(_))
+        ));
     }
 
     #[tokio::test]

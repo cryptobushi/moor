@@ -144,6 +144,8 @@ pub fn mk_routes(
     let mut auth_routes = Router::new()
         .route("/auth/connect", post(host::connect_auth_handler))
         .route("/auth/create", post(host::create_auth_handler))
+        // RuneWorld (ADR 0005 decision 8): a signed connect instead of a name and password.
+        .route("/v1/rw/signed_connect", post(host::signed_connect_handler))
         .layer(DefaultBodyLimit::max(64 * 1024))
         .with_state(web_host.clone());
 
@@ -184,6 +186,11 @@ pub fn mk_routes(
         .route("/v1/command", post(host::command_handler))
         .route("/v1/eval", post(host::eval_handler))
         .route("/v1/features", get(host::features_handler))
+        // RuneWorld: envelopes, chain status and source offer, public admission state.
+        .route("/v1/rw/envelope", post(host::envelope_handler))
+        .route("/v1/heights", get(host::heights_handler))
+        .route("/v1/rw/session/{key}", get(host::session_handler))
+        .route("/v1/rw/wallet/{address}", get(host::wallet_handler))
         .route("/health", get(host::health_handler))
         .route("/version", get(host::version_handler))
         .route("/openapi.yaml", get(host::openapi_handler))

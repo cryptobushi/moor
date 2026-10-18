@@ -17,6 +17,7 @@ mod actions;
 mod auth;
 mod handlers;
 pub(crate) mod negotiate;
+pub mod runeworld;
 mod session;
 pub mod web_host;
 
@@ -37,6 +38,9 @@ pub use handlers::{
     properties_handler, property_retrieval_handler, query_objects_handler, session_command_handler,
     session_input_handler, set_pubkey_handler, update_property_handler, verb_program_handler,
     verb_retrieval_handler, verbs_handler, web_hook_handler,
+};
+pub use runeworld::{
+    envelope_handler, heights_handler, session_handler, signed_connect_handler, wallet_handler,
 };
 pub use web_host::{
     WebHost, eval_handler, features_handler, health_handler, invoke_welcome_message_handler,

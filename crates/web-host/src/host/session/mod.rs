@@ -44,7 +44,10 @@ use self::webrtc::{
     SignalingMessage, WebRtcConfig, WebRtcPeer, encode_signaling_message, parse_signaling_message,
 };
 use self::websocket::{ReadEvent, read_websocket_event};
-use crate::host::actions::{action_request, is_action_frame};
+use crate::host::{
+    actions::{action_request, is_action_frame},
+    runeworld::{envelope_request, is_envelope_frame},
+};
 
 const WEBSOCKET_PING_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -145,8 +148,11 @@ impl ClientSession {
             if expecting_input.is_empty()
                 && self.pending_task.is_none()
                 && let Some(action) = deferred_actions.pop_front()
+                && let Some(reply) = self.process_command_line(action).await
+                && let Err(e) = ws_sender.send(Message::Binary(reply.into())).await
             {
-                self.process_command_line(action).await;
+                error!("Failed to send an envelope rejection: {}", e);
+                break;
             }
             // Check for heartbeat timeout - if we sent a heartbeat and haven't received
             // a response within HEARTBEAT_TIMEOUT, the websocket connection is likely zombie.
@@ -169,7 +175,12 @@ impl ClientSession {
                     match line {
                         ReadEvent::Command(line) => {
                             if expecting_input.is_empty() {
-                                self.process_command_line(line).await;
+                                if let Some(reply) = self.process_command_line(line).await
+                                    && let Err(e) = ws_sender.send(Message::Binary(reply.into())).await
+                                {
+                                    error!("Failed to send an envelope rejection: {}", e);
+                                    break;
+                                }
                             } else {
                                 // Keep actions separate from read() replies, including prompt races.
                                 if deferred_actions.len() >= 64 {
@@ -342,8 +353,20 @@ impl ClientSession {
             .ok();
     }
 
-    async fn process_command_line(&mut self, line: Message) {
+    /// Send one command, structured action or signed envelope. Returns a frame for the client
+    /// when the daemon refused an envelope (the rejection, so the client is not left waiting).
+    async fn process_command_line(&mut self, line: Message) -> Option<Vec<u8>> {
+        let is_envelope = matches!(line, Message::Binary(ref bytes) if is_envelope_frame(bytes));
         let request = if let Message::Binary(ref bytes) = line
+            && is_envelope
+        {
+            envelope_request(
+                self.handler_object,
+                self.client_token.clone(),
+                Some(self.auth_token.clone()),
+                bytes[1..].to_vec(),
+            )
+        } else if let Message::Binary(ref bytes) = line
             && is_action_frame(bytes)
         {
             match action_request(
@@ -355,7 +378,7 @@ impl ClientSession {
                 Ok(request) => request,
                 Err(error) => {
                     warn!(%error, "Invalid structured action");
-                    return;
+                    return None;
                 }
             }
         } else {
@@ -363,7 +386,7 @@ impl ClientSession {
                 Ok(line) => line,
                 Err(e) => {
                     warn!("Received non-text command message: {}", e);
-                    return;
+                    return None;
                 }
             };
             ClientRequest::Command {
@@ -382,13 +405,19 @@ impl ClientSession {
             .await;
         let reply = match reply {
             Ok(reply) => reply,
+            Err(e) if is_envelope => {
+                debug!(error = %e, "envelope refused");
+                return self.envelope_rejection(&e);
+            }
             Err(e) => {
                 warn!("Unable to send command to RPC server: {}", e);
-                return;
+                return None;
             }
         };
 
         match reply {
+            // An admitted envelope that ran no MOO task (task id 0) has no completion to wait for.
+            ClientReply::TaskSubmitted { task_id: 0 } if is_envelope => {}
             ClientReply::TaskSubmitted { task_id } => {
                 self.set_pending_task(task_id as usize);
             }
@@ -399,6 +428,35 @@ impl ClientSession {
                 error!("Unexpected daemon to client reply");
             }
         }
+        None
+    }
+
+    /// A `SystemMessage` frame (sequence 0) telling the client its envelope was refused. The text
+    /// starts with `envelope rejected:` so a signing client can release its command gate.
+    fn envelope_rejection(&self, error: &moor_runtime_api::RpcError) -> Option<Vec<u8>> {
+        let reason = match error {
+            moor_runtime_api::RpcError::Daemon(
+                moor_runtime_api::RpcMessageError::LoginTaskFailed(reason)
+                | moor_runtime_api::RpcMessageError::InvalidRequest(reason),
+            ) => reason.clone(),
+            moor_runtime_api::RpcError::Daemon(e) => e.to_string(),
+            _ => "the world is unavailable".to_string(),
+        };
+        let message = if reason.starts_with("envelope rejected") {
+            reason
+        } else {
+            format!("envelope rejected: {reason}")
+        };
+        let event = moor_runtime_api::api::ClientEventMessage {
+            sequence: 0,
+            event: ClientEvent::SystemMessage {
+                player: self.player,
+                message,
+            },
+        };
+        encode_client_event_bytes(&event)
+            .map_err(|e| error!("Failed to encode an envelope rejection: {}", e))
+            .ok()
     }
 
     /// Close the WebRTC peer connection if one exists.
