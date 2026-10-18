@@ -29,6 +29,7 @@ use moor_kernel::{
     config::{Config, FeaturesConfig},
     tasks::{
         NoopTasksDb,
+        block_driver::BlockDriver,
         scheduler::{Scheduler, SchedulerThreads},
     },
 };
@@ -56,6 +57,8 @@ pub struct TestEnvironment<T: Transport + 'static> {
     pub _temp_dir: TempDir,
     pub _temp_output_dir: Option<TempDir>,
     pub output_dir_path: Option<PathBuf>,
+    /// Set in sequencer mode: the block driver the scheduler hands to the sequencer.
+    pub driver: Option<BlockDriver>,
     scheduler_thread: Option<SchedulerThreads>,
     rpc_thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -155,6 +158,32 @@ pub fn setup_test_environment_with_core<T>(
 where
     T: Transport + 'static,
 {
+    build_environment(transport, configure, core, false)
+}
+
+/// The daemon as `--sequencer` runs it: a deterministic scheduler without service threads whose
+/// block driver is returned in [`TestEnvironment::driver`]. `configure` must turn on
+/// `config.deterministic`. Deterministic mode is process-global; see `deterministic_rpc_test`.
+pub fn setup_sequencer_environment<T>(
+    transport: Arc<T>,
+    configure: impl FnOnce(&mut Config),
+    core: Option<&Path>,
+) -> TestEnvironment<T>
+where
+    T: Transport + 'static,
+{
+    build_environment(transport, configure, core, true)
+}
+
+fn build_environment<T>(
+    transport: Arc<T>,
+    configure: impl FnOnce(&mut Config),
+    core: Option<&Path>,
+    sequencer: bool,
+) -> TestEnvironment<T>
+where
+    T: Transport + 'static,
+{
     setup_tracing();
 
     let (public_key, private_key) = create_test_keys();
@@ -230,10 +259,18 @@ where
         })
         .expect("Failed to spawn RPC server thread");
 
-    let scheduler_thread = scheduler
-        .start(rpc_server.clone())
-        .expect("Failed to start scheduler");
-    wait_for_scheduler_ready(&scheduler_client);
+    let (scheduler_thread, driver) = if sequencer {
+        let driver = scheduler
+            .start_block_driver(rpc_server.clone())
+            .expect("Failed to start block driver");
+        (None, Some(driver))
+    } else {
+        let threads = scheduler
+            .start(rpc_server.clone())
+            .expect("Failed to start scheduler");
+        wait_for_scheduler_ready(&scheduler_client);
+        (Some(threads), None)
+    };
 
     TestEnvironment {
         message_handler,
@@ -246,7 +283,8 @@ where
         _temp_dir: temp_dir,
         _temp_output_dir: None,
         output_dir_path: None,
-        scheduler_thread: Some(scheduler_thread),
+        driver,
+        scheduler_thread,
         rpc_thread: Some(rpc_thread),
     }
 }

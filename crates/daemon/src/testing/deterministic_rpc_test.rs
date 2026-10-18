@@ -310,7 +310,7 @@ fn deterministic_daemon_signed_flow() {
 }
 
 /// A daemon-signed auth token for `player`, as the PASETO login path would mint.
-fn auth_token_for(player: Obj) -> AuthToken {
+pub(super) fn auth_token_for(player: Obj) -> AuthToken {
     use rusty_paseto::core::{Footer, Paseto, PasetoAsymmetricPrivateKey, Payload, Public, V4};
     let (_, key) = test_env::create_test_keys();
     AuthToken(

@@ -40,3 +40,6 @@ mod property_update_test;
 
 #[cfg(test)]
 mod deterministic_rpc_test;
+
+#[cfg(test)]
+mod sequencer_reads_test;

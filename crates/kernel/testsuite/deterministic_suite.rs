@@ -2964,6 +2964,7 @@ mod sequencer {
         Segment, SequencerInput, SequencerInputKind, SequencerKey, seed_for,
     };
     use moor_common::{
+        deterministic,
         envelope::{Envelope, scope},
         tasks::{NoopClientSession, Session},
     };
@@ -3230,6 +3231,103 @@ mod sequencer {
         let receipt = seq.submit(third, noop(), None).unwrap();
         assert_eq!((receipt.height, receipt.command_index), (2, 1));
         seq.seal().unwrap();
+        seq.shutdown().unwrap();
+    }
+
+    /// Read through the sequencer's scheduler, the way an RPC thread does, while a block is open.
+    fn read_during_block(seq: &Sequencer) {
+        use moor_kernel::{
+            SchedulerClient,
+            tasks::world_state_action::{WorldStateAction, WorldStateResult},
+        };
+        let client = SchedulerClient::new(seq.driver().scheduler().clone());
+        assert!(client.is_sequencer_owned());
+        let player = Obj::mk_id(3);
+        let results = client
+            .read_world_state_batch(vec![
+                WorldStateAction::GetObjectFlags { obj: player },
+                WorldStateAction::ListObjects { player },
+                WorldStateAction::RequestAllObjects { player },
+            ])
+            .expect("reads are answered in sequencer mode");
+        assert!(matches!(
+            results[..],
+            [
+                WorldStateResult::ObjectFlags(_),
+                WorldStateResult::ObjectsList(_),
+                WorldStateResult::AllObjects(_)
+            ]
+        ));
+    }
+
+    /// One block of two inputs with a read between them (or none): the sealed block, and the
+    /// command index and state root observed across the read.
+    fn block_with_reads(reads: bool) -> (SealedBlock, [u64; 2]) {
+        let (_world, mut seq) = start(SequencerParams::default());
+        seq.open_block(T0, Instant::now()).expect("open");
+        let first = seq
+            .submit(disconnect(Obj::mk_id(10)), noop(), None)
+            .expect("first");
+        let before = (
+            deterministic::current().map(|c| c.command),
+            seq.driver().state_root().expect("root").root,
+        );
+        if reads {
+            read_during_block(&seq);
+        }
+        let after = (
+            deterministic::current().map(|c| c.command),
+            seq.driver().state_root().expect("root").root,
+        );
+        assert_eq!(
+            before, after,
+            "a read moved the command index or the state root"
+        );
+        let second = seq
+            .submit(disconnect(Obj::mk_id(11)), noop(), None)
+            .expect("second");
+        let sealed = seq.seal().expect("seal").block;
+        seq.shutdown().expect("shutdown");
+        (sealed, [first.command_index, second.command_index])
+    }
+
+    #[test]
+    fn a_read_during_a_block_takes_no_command_index() {
+        let (_, indices) = block_with_reads(true);
+        assert_eq!(indices, [1, 2]);
+    }
+
+    #[test]
+    fn a_read_during_a_block_leaves_the_sealed_block_unchanged() {
+        let (with, _) = block_with_reads(true);
+        let (without, _) = block_with_reads(false);
+        assert_eq!(
+            (
+                with.header.header.state_root,
+                with.header.header.commands_root,
+                with.header.header.events_root
+            ),
+            (
+                without.header.header.state_root,
+                without.header.header.commands_root,
+                without.header.header.events_root
+            )
+        );
+    }
+
+    #[test]
+    fn a_write_through_the_read_path_is_refused_while_a_sequencer_owns_the_scheduler() {
+        use moor_kernel::{SchedulerClient, tasks::world_state_action::WorldStateAction};
+        let (_world, seq) = start(SequencerParams::default());
+        let client = SchedulerClient::new(seq.driver().scheduler().clone());
+        let write = WorldStateAction::UpdateProperty {
+            player: Obj::mk_id(3),
+            authority_principal: Obj::mk_id(3),
+            obj: moor_common::model::ObjectRef::Id(Obj::mk_id(0)),
+            property: moor_var::Symbol::mk("x"),
+            value: moor_var::v_int(1),
+        };
+        assert!(client.read_world_state_batch(vec![write]).is_err());
         seq.shutdown().unwrap();
     }
 
